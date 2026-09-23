@@ -282,5 +282,42 @@ console.log("\n[8] listFolder 直链状态 + 幂等复用条件");
   eq(await folderReuse.bind("/dead", Date.now()).first(), null, "复用判定：文件夹撤销 → 不复用");
 }
 
+/* ═══════════ 10. 文件夹直链 · 目录内文件下载查询（public.ts handleDirectFolderDownload 语义） ═══════════ */
+{
+  const { env, sqlite } = freshEnv();
+  addDir(env, "/1234");
+  addDir(env, "/1234/sub");
+  addFile(env, "/1234", "lx-music-source-v6+(修复).js", 64000);
+  addFile(env, "/1234", "Motrix-1.8.19-x64.exe", 65000000);
+  addFile(env, "/1234/sub", "deep.txt");
+  addFile(env, "/", "rootfile.bin");
+
+  // 模拟列表页链接 /d/:token/download?p=<encodeURIComponent(rel)>，URLSearchParams 解码一次
+  const lookup = async (folderPath, rel) => {
+    const url = new URL("https://x/d/tok/download?p=" + encodeURIComponent(rel));
+    const raw = url.searchParams.get("p");
+    const fullPath = f.resolveInsideFolder(folderPath, raw);
+    if (fullPath === null || fullPath === folderPath) return null;
+    const lastSlash = fullPath.lastIndexOf("/");
+    const parentDir = lastSlash <= 0 ? "/" : fullPath.slice(0, lastSlash);
+    const baseName = fullPath.slice(lastSlash + 1);
+    return env.db.prepare("SELECT id, name FROM files WHERE path = ?1 AND name = ?2")
+      .bind(parentDir, baseName).first();
+  };
+
+  const hit1 = await lookup("/1234", "lx-music-source-v6+(修复).js");
+  ok(hit1 && hit1.name === "lx-music-source-v6+(修复).js", "下载查询：目录+文件名拆分匹配（含 +()中文）");
+  ok(await lookup("/1234", "Motrix-1.8.19-x64.exe") !== null, "下载查询：exe 文件命中");
+  ok(await lookup("/1234", "sub/deep.txt") !== null, "下载查询：子目录内文件命中");
+  ok(await lookup("/", "rootfile.bin") !== null, "下载查询：根目录直链 lastSlash=0 → parent='/' 命中");
+  eq(await lookup("/1234", "不存在.exe"), null, "下载查询：不存在的文件 → null（404）");
+  eq(await lookup("/1234", "../other.txt"), null, "下载查询：穿越路径被 resolveInsideFolder 拒绝 → null");
+
+  // 回归护栏：旧的错误查询（把完整路径当 files.path）必须查不到 —— 证明 bug 场景真实存在过
+  const oldStyle = await env.db.prepare("SELECT id FROM files WHERE path = ?1")
+    .bind("/1234/lx-music-source-v6+(修复).js").first();
+  eq(oldStyle, null, "回归护栏：旧查询(WHERE path=完整路径)确实查不到 → 已修复的必要性");
+}
+
 console.log(`\n══════════ 结果: ${passed} 通过, ${failed} 失败 ══════════`);
 process.exit(failed > 0 ? 1 : 0);

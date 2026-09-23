@@ -609,9 +609,13 @@ async function handleDirectFolderDownload(
     return errorPage(req, 400, { zh: "无法下载", en: "Cannot Download" },
       { zh: "请从列表页选择要下载的文件。", en: "Please pick a file from the folder listing." });
   }
+  // files.path 存"所在目录"，文件名在 name 列 —— 需拆分匹配（不能拿完整路径当 path 查）
+  const lastSlash = fullPath.lastIndexOf("/");
+  const parentDir = lastSlash <= 0 ? "/" : fullPath.slice(0, lastSlash);
+  const baseName = fullPath.slice(lastSlash + 1);
   const fileRow = await env.db.prepare(
-    "SELECT id, key, name, size, mime FROM files WHERE path = ?1"
-  ).bind(fullPath).first<{ id: string; key: string; name: string; size: number; mime: string }>();
+    "SELECT id, key, name, size, mime FROM files WHERE path = ?1 AND name = ?2"
+  ).bind(parentDir, baseName).first<{ id: string; key: string; name: string; size: number; mime: string }>();
   if (!fileRow) {
     // 可能指向的是子文件夹
     const isDir = await dirExists(env, fullPath);
