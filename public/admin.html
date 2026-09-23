@@ -59,6 +59,10 @@
   --btn-danger-bg-active: rgba(255,69,58,.26);
   --btn-danger-border: rgba(255,69,58,.28);
   --btn-danger-color: #ffb3ae;
+  --btn-amber-bg: rgba(250,204,21,.14);
+  --btn-amber-bg-hover: rgba(250,204,21,.24);
+  --btn-amber-border: rgba(250,204,21,.45);
+  --btn-amber-color: #fde047;
   --radius: 18px;
   --blue: #0a84ff;
 }
@@ -117,6 +121,10 @@
   --btn-danger-bg-active: rgba(255,59,48,.2);
   --btn-danger-border: rgba(255,59,48,.22);
   --btn-danger-color: #d70015;
+  --btn-amber-bg: rgba(250,204,21,.2);
+  --btn-amber-bg-hover: rgba(250,204,21,.32);
+  --btn-amber-border: rgba(202,138,4,.55);
+  --btn-amber-color: #713f12;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -173,6 +181,10 @@
   --btn-danger-bg-active: rgba(255,59,48,.2);
   --btn-danger-border: rgba(255,59,48,.22);
   --btn-danger-color: #d70015;
+  --btn-amber-bg: rgba(250,204,21,.2);
+  --btn-amber-bg-hover: rgba(250,204,21,.32);
+  --btn-amber-border: rgba(202,138,4,.55);
+  --btn-amber-color: #713f12;
   --radius: 24px;
 }
 
@@ -227,6 +239,10 @@
   --btn-danger-bg-active: rgba(255,69,58,.36);
   --btn-danger-border: rgba(255,69,58,.4);
   --btn-danger-color: #ffb3ae;
+  --btn-amber-bg: rgba(250,204,21,.14);
+  --btn-amber-bg-hover: rgba(250,204,21,.24);
+  --btn-amber-border: rgba(250,204,21,.45);
+  --btn-amber-color: #fde047;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -349,9 +365,18 @@ body {
 }
 .sb-sub button:hover { color: var(--text); background: var(--sf); }
 .sb-sub button.active {
-  color: var(--text); background: rgba(10,132,255,.15);
-  box-shadow: inset 2px 0 0 #0a84ff, var(--shadow-inset-hi);
+  color: #fff;
+  background: linear-gradient(90deg, #facc15 0%, #b45309 34%, #111 80%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 4px 14px rgba(250,204,21,.18);
   font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0,0,0,.5);
+}
+/* 单页 Tab（无子项，如"概览"）激活态同样使用黄→黑渐变 */
+.sb-main.single.open {
+  color: #fff;
+  background: linear-gradient(90deg, #facc15 0%, #b45309 34%, #111 80%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 4px 14px rgba(250,204,21,.18);
+  text-shadow: 0 1px 2px rgba(0,0,0,.5);
 }
 
 /* ── 移动端折叠 ───────────────────────── */
@@ -440,6 +465,13 @@ body {
 }
 .btn.danger:hover { background: var(--btn-danger-bg-hover); box-shadow: var(--shadow-btn-danger); }
 .btn.danger:active { background: var(--btn-danger-bg-active); }
+/* 直链按钮（生成/查看）：琥珀色、主题感知文字色，保证亮暗主题下均清晰可读 */
+.btn.amber {
+  background: var(--btn-amber-bg); border-color: var(--btn-amber-border);
+  color: var(--btn-amber-color); font-weight: 700; box-shadow: none;
+}
+.btn.amber:hover { background: var(--btn-amber-bg-hover); box-shadow: 0 2px 8px rgba(250,204,21,.2); }
+.btn.amber:active { background: var(--btn-amber-bg-hover); }
 .btn.sm { padding: 7px 12px; font-size: 12.5px; border-radius: 11px; box-shadow: none; }
 .btn.sm:hover { box-shadow: var(--shadow-btn-plain-hover); }
 .btn[disabled] { opacity: .4; pointer-events: none; }
@@ -641,7 +673,7 @@ const I18N = {
     loginSubtitle: '管理后台 · 请输入管理密钥登录', keyPlaceholder: '管理密钥 (admin)',
     // 标签
     tabOverview: '概览', tabFiles: '文件', tabStorage: '存储浏览', tabShares: '分享', tabDirect: '直链', tabLogs: '记录', tabBans: '封禁', tabGlobal: '全球分布', tabSecurity: '安全', tabSettings: '设置', tabWebDAV: 'WebDAV',
-    navContent: '内容管理', navAnalytics: '运营分析', navSecurity: '安全中心', navSystem: '系统设置',
+    navContent: '文件管理', navAnalytics: '运营分析', navSecurity: '安全中心', navSystem: '系统设置',
     // 概览
     statTraffic: '本月流量', usedPercent: '已用 {n}% · 跨月自动重置', noLimit: '未设置限额',
     statDownloads: '累计下载', todayN: '今日 {n} 次', statFiles: '文件总数', storedR2: '存储于 R2 对象存储',
@@ -658,7 +690,7 @@ const I18N = {
     // 文件
     dropTitle: '拖拽文件到此处，或点击上传',
     dropDesc: '单文件最大 100 MB（Workers 请求限制）· 直传 R2 对象存储',
-    allFiles: '全部文件', noFiles: '还没有文件，上传一个试试', createShare: '创建分享', createDirect: '创建直链', del: '删除',
+    allFiles: '全部文件', noFiles: '还没有文件，上传一个试试', createShare: '创建分享', createDirect: '生成直链', viewDirect: '查看直链', del: '删除',
     tooLarge: '「{name}」超过 100 MB 限制', uploadOk: '「{name}」上传成功', uploadFail: '「{name}」上传失败',
     uploadDone: '完成 ✅', uploadFailShort: '失败',
     // 文件夹管理
@@ -998,7 +1030,7 @@ const I18N = {
     loginSubtitle: 'Admin console · Enter your admin key to continue', keyPlaceholder: 'Admin key (admin)',
     // 标签
     tabOverview: 'Overview', tabFiles: 'Files', tabStorage: 'Storage', tabShares: 'Shares', tabDirect: 'Direct', tabLogs: 'Logs', tabBans: 'Bans', tabGlobal: 'Global', tabSecurity: 'Security', tabSettings: 'Settings', tabWebDAV: 'WebDAV',
-    navContent: 'Content', navAnalytics: 'Analytics', navSecurity: 'Security', navSystem: 'System',
+    navContent: 'Files', navAnalytics: 'Analytics', navSecurity: 'Security', navSystem: 'System',
     // 概览
     statTraffic: 'Monthly Traffic', usedPercent: '{n}% used · resets monthly', noLimit: 'No limit set',
     statDownloads: 'Total Downloads', todayN: '{n} today', statFiles: 'Files', storedR2: 'Stored in R2 object storage',
@@ -1015,7 +1047,7 @@ const I18N = {
     // 文件
     dropTitle: 'Drop files here or click to upload',
     dropDesc: 'Max 100 MB per file (Workers limit) · Stored directly in R2',
-    allFiles: 'All Files', noFiles: 'No files yet — upload one to get started', createShare: 'Share', createDirect: 'Direct', del: 'Delete',
+    allFiles: 'All Files', noFiles: 'No files yet — upload one to get started', createShare: 'Share', createDirect: 'Create Link', viewDirect: 'View Link', del: 'Delete',
     tooLarge: '"{name}" exceeds the 100 MB limit', uploadOk: '"{name}" uploaded', uploadFail: '"{name}" upload failed',
     uploadDone: 'Done ✅', uploadFailShort: 'Failed',
     // Folder management
@@ -1870,7 +1902,9 @@ async function loadFiles(){
             <td class="num">—</td>
             <td class="num">—</td>
             <td><div class="actions-cell">
-              <button class="btn sm" data-fdirect="${esc(d.path)}" style="background:rgba(250,204,21,0.15);border-color:rgba(250,204,21,0.35);color:#fde68a">${esc(t('createDirect'))}</button>
+              ${d.direct_link_id
+                ? `<button class="btn sm amber" data-vfdirect="${esc(d.direct_link_id)}">${esc(t('viewDirect'))}</button>`
+                : `<button class="btn sm amber" data-fdirect="${esc(d.path)}">${esc(t('createDirect'))}</button>`}
               <button class="btn sm danger" data-fdel="${esc(d.path)}" data-fname="${esc(d.name)}">${esc(t('del'))}</button>
             </div></td>
           </tr>`).join('')}
@@ -1884,7 +1918,9 @@ async function loadFiles(){
             <td class="num">${fmtTime(f.uploaded_at)}</td>
             <td><div class="actions-cell">
               <button class="btn sm primary" data-share="${f.id}">${esc(t('createShare'))}</button>
-              <button class="btn sm" data-direct="${f.id}" style="background:rgba(250,204,21,0.15);border-color:rgba(250,204,21,0.35);color:#fde68a">${esc(t('createDirect'))}</button>
+              ${f.direct_link_id
+                ? `<button class="btn sm amber" data-vdirect="${esc(f.direct_link_id)}">${esc(t('viewDirect'))}</button>`
+                : `<button class="btn sm amber" data-direct="${f.id}">${esc(t('createDirect'))}</button>`}
               <button class="btn sm danger" data-del="${f.id}" data-name="${esc(f.name)}">${esc(t('del'))}</button>
             </div></td>
           </tr>`).join('')}
@@ -1903,9 +1939,11 @@ async function loadFiles(){
   $$('#files-bc [data-bc]').forEach(a => a.onclick = () => { filesPath = a.dataset.bc; loadFiles(); });
   $$('[data-fopen]').forEach(b => b.onclick = () => { filesPath = b.dataset.fopen; loadFiles(); });
   $$('[data-fdirect]').forEach(b => b.onclick = () => openDirectModal(null, b.dataset.fdirect));
+  $$('[data-vfdirect]').forEach(b => b.onclick = () => openViewDirect(b.dataset.vfdirect));
   $$('[data-fdel]').forEach(b => b.onclick = () => deleteFolderFlow(b.dataset.fdel, b.dataset.fname));
   $$('[data-share]').forEach(b => b.onclick = () => openShareModal(b.dataset.share));
   $$('[data-direct]').forEach(b => b.onclick = () => openDirectModal(b.dataset.direct, null));
+  $$('[data-vdirect]').forEach(b => b.onclick = () => openViewDirect(b.dataset.vdirect));
   $$('[data-del]').forEach(b => b.onclick = async () => {
     if(!(await confirmDialog(t('deleteFileT'), t('deleteFileD', {name: b.dataset.name})))) return;
     await api(`/api/admin/files/${b.dataset.del}`, { method:'DELETE' });
@@ -2102,6 +2140,7 @@ function openDirectModal(fileId, folderPath){
     try{
       const r = await api('/api/admin/direct-links', { method:'POST', body: JSON.stringify(payload) });
       const url = location.origin + r.url;
+      loadFiles(); // 刷新列表，使"生成/查看直链"按钮状态与直链生成状态同步
       openModal(`
         <h3>${esc(t('directCreated'))}</h3>
         <div class="sub">${esc(t('directCreatedSub'))}</div>
@@ -2123,6 +2162,40 @@ function openDirectModal(fileId, folderPath){
       $('#dl-open').onclick = () => window.open(r.url, '_blank');
     }catch(e){ toast(e.message, 'err'); }
   };
+}
+
+/* ═══════════ 查看直链弹窗（复用已生成的链接地址） ═══════════ */
+async function openViewDirect(directId){
+  try{
+    const r = await api(`/api/admin/direct-links/${directId}`);
+    const url = location.origin + r.url;
+    const dl = r.download_count ?? 0;
+    const mx = r.max_downloads ?? '∞';
+    const exp = r.expires_at ? fmtTime(r.expires_at) : t('perm');
+    openModal(`
+      <h3>${esc(t('viewDirect'))}</h3>
+      <div class="sub">${esc(r.folder_path ? `📁 ${r.folder_path}` : `📄 ${r.file_name ?? ''}`)}</div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">${esc(t('directUrlLabel'))}</div>
+            <div class="link-box">
+              <input readonly value="${esc(url)}" onclick="this.select()">
+              <button class="btn primary" data-copy="${esc(url)}">${esc(t('copy'))}</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:18px;font-size:13px;color:var(--text-2);flex-wrap:wrap">
+            <span>${esc(t('colDownloads'))}: <b style="color:var(--text)">${dl} / ${esc(mx)}</b></span>
+            <span>${esc(t('validity'))}: <b style="color:var(--text)">${esc(exp)}</b></span>
+          </div>
+        </div>
+      <div class="actions">
+        <button class="btn" data-x>${esc(t('close'))}</button>
+        <button class="btn primary" id="dlv-open">${esc(t('preview'))}</button>
+      </div>`);
+    document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => copyText(b.dataset.copy));
+    $('[data-x]').onclick = closeModal;
+    $('#dlv-open').onclick = () => window.open(r.url, '_blank');
+  }catch(e){ toast(e.message, 'err'); }
 }
 
 /* ═══════════ 存储浏览（S3 / R2） ═══════════ */

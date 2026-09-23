@@ -132,6 +132,8 @@ export interface FolderEntry {
   /** 递归总字节数 */
   total_bytes: number;
   explicit: boolean;
+  /** 该文件夹当前有效直链的 token（/d/:token）；无则 null */
+  direct_link_id: string | null;
 }
 
 export interface FolderListing {
@@ -145,29 +147,47 @@ export interface FolderListing {
     uploaded_at: number;
     share_count: number;
     download_count: number;
+    /** 该文件当前有效直链的 token（/d/:token）；无则 null */
+    direct_link_id: string | null;
   }[];
 }
 
 /**
+ * "有效直链"条件（与创建直链的幂等复用判断保持一致）：
+ *   未撤销 + 未过期 + 未达次数上限。fragment 中的 ?1 为 expires 比较占位。
+ */
+const ACTIVE_DL_COND =
+  `revoked = 0 AND (expires_at IS NULL OR expires_at > ?DL_NOW)
+   AND (max_downloads IS NULL OR download_count < max_downloads)`;
+
+/**
  * 列出某目录的直接子项（子文件夹 + 文件）。
  * 子文件夹来源 = directories 表 ∪ 文件路径推导（与 WebDAV 一致）。
- * 每个文件夹带递归文件数 / 字节数（供 UI 展示与删除确认）。
+ * 每个文件夹带递归文件数 / 字节数（供 UI 展示与删除确认），
+ * 文件/文件夹均附带 direct_link_id（是否有有效直链，驱动前端"生成/查看直链"按钮状态）。
  */
 export async function listFolder(env: Env, path: string): Promise<FolderListing> {
   const p = path === "/" ? "/" : path.replace(/\/+$/, "") || "/";
+  const now = Date.now();
 
-  // ① 直接子文件（带分享聚合，与原 /api/admin/files 的相关子查询模式一致）
+  // ① 直接子文件（带分享聚合 + 有效直链子查询，与原 /api/admin/files 的相关子查询模式一致）
   const { results: fileRows } = await env.db
     .prepare(
       `SELECT f.id, f.name, f.size, f.mime, f.path, f.uploaded_at,
               (SELECT COUNT(*) FROM shares s WHERE s.file_id = f.id) AS share_count,
-              (SELECT COALESCE(SUM(s.download_count), 0) FROM shares s WHERE s.file_id = f.id) AS download_count
+              (SELECT COALESCE(SUM(s.download_count), 0) FROM shares s WHERE s.file_id = f.id) AS download_count,
+              (SELECT dl.id FROM direct_links dl
+               WHERE dl.file_id = f.id AND dl.folder_path IS NULL AND dl.revoked = 0
+                 AND (dl.expires_at IS NULL OR dl.expires_at > ?2)
+                 AND (dl.max_downloads IS NULL OR dl.download_count < dl.max_downloads)
+               ORDER BY dl.created_at DESC LIMIT 1) AS direct_link_id
        FROM files f WHERE f.path = ?1 ORDER BY f.uploaded_at DESC`
     )
-    .bind(p)
+    .bind(p, now)
     .all<{
       id: string; name: string; size: number; mime: string; path: string;
       uploaded_at: number; share_count: number; download_count: number;
+      direct_link_id: string | null;
     }>();
 
   // ② 拉取当前目录子树内所有文件路径（用于推导子目录 + 递归计数）
@@ -208,6 +228,26 @@ export async function listFolder(env: Env, path: string): Promise<FolderListing>
   const names = Array.from(new Set([...stats.keys(), ...explicitSet])).sort((a, b) =>
     a.localeCompare(b)
   );
+
+  // ④ 批量查询这些子文件夹的有效直链（一次 IN 查询，逐个映射）
+  const childPaths = names.map((name) => joinDirPath(p, name));
+  const folderLinks = new Map<string, string>();
+  if (childPaths.length) {
+    const placeholders = childPaths.map((_, i) => `?${i + 1}`).join(",");
+    const cond = ACTIVE_DL_COND.replace("?DL_NOW", `?${childPaths.length + 1}`);
+    const { results: dlRows } = await env.db
+      .prepare(
+        `SELECT id, folder_path FROM direct_links
+         WHERE folder_path IN (${placeholders}) AND ${cond}
+         ORDER BY created_at DESC`
+      )
+      .bind(...childPaths, now)
+      .all<{ id: string; folder_path: string }>();
+    for (const row of dlRows ?? []) {
+      if (!folderLinks.has(row.folder_path)) folderLinks.set(row.folder_path, row.id);
+    }
+  }
+
   const folders: FolderEntry[] = names.map((name) => {
     const st = stats.get(name) ?? { count: 0, bytes: 0 };
     return {
@@ -216,6 +256,7 @@ export async function listFolder(env: Env, path: string): Promise<FolderListing>
       file_count: st.count,
       total_bytes: st.bytes,
       explicit: explicitSet.has(name),
+      direct_link_id: folderLinks.get(joinDirPath(p, name)) ?? null,
     };
   });
 
@@ -230,6 +271,7 @@ export async function listFolder(env: Env, path: string): Promise<FolderListing>
       uploaded_at: f.uploaded_at,
       share_count: f.share_count,
       download_count: f.download_count,
+      direct_link_id: f.direct_link_id ?? null,
     })),
   };
 }

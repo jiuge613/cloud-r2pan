@@ -222,5 +222,65 @@ console.log("\n[7] LIKE 转义防越权");
   eq(s2.files, 1, "folderStats 对含 _ 路径精确匹配");
 }
 
+/* ═══════════ 5. 直链状态（direct_link_id）与幂等复用 ═══════════ */
+console.log("\n[8] listFolder 直链状态 + 幂等复用条件");
+{
+  const { env } = freshEnv();
+  const fActive = addFile(env, "/", "active.txt");   // 有有效直链
+  const fRevoked = addFile(env, "/", "revoked.txt"); // 只有已撤销直链
+  const fExpired = addFile(env, "/", "expired.txt"); // 只有已过期直链
+  const fMaxed = addFile(env, "/", "maxed.txt");     // 只有已达上限直链
+  const fNone = addFile(env, "/", "none.txt");       // 从未生成直链
+  const fMulti = addFile(env, "/", "multi.txt");     // 多条直链：旧的过期 + 新的有效 → 取有效的
+  addDir(env, "/docs");
+  addDir(env, "/dead");
+  const ins = (id, fileId, opts = {}) => env.db.prepare(
+    "INSERT INTO direct_links(id,file_id,created_at,expires_at,max_downloads,download_count,revoked,folder_path) VALUES(?,?,?,?,?,?,?,?)"
+  ).run(id, fileId ?? "", Date.now(), opts.expires ?? null, opts.max ?? null, opts.used ?? 0, opts.revoked ?? 0, opts.folder ?? null);
+
+  ins("dl-a1", fActive);
+  ins("dl-r1", fRevoked, { revoked: 1 });
+  ins("dl-e1", fExpired, { expires: Date.now() - 1000 });
+  ins("dl-m1", fMaxed, { max: 5, used: 5 });
+  ins("dl-x1", fMulti, { expires: Date.now() - 1000 });
+  ins("dl-x2", fMulti);
+  ins("fl-doc1", null, { folder: "/docs" });
+  ins("fl-dead", null, { folder: "/dead", revoked: 1 });
+
+  const root = await f.listFolder(env, "/");
+  const byName = Object.fromEntries(root.files.map(x => [x.name, x.direct_link_id]));
+  eq(byName["active.txt"], "dl-a1", "有效直链 → 返回 token");
+  eq(byName["revoked.txt"], null, "仅已撤销直链 → null（按钮回到生成直链）");
+  eq(byName["expired.txt"], null, "仅已过期直链 → null");
+  eq(byName["maxed.txt"], null, "仅已达上限直链 → null");
+  eq(byName["none.txt"], null, "从未生成 → null");
+  eq(byName["multi.txt"], "dl-x2", "多条直链取最新有效的一条");
+  eq(root.folders.find(d => d.name === "docs").direct_link_id, "fl-doc1", "文件夹有效直链 → token");
+  eq(root.folders.find(d => d.name === "dead").direct_link_id, null, "文件夹已撤销直链 → null");
+
+  // 幂等复用判定 SQL（与 admin.ts POST /api/admin/direct-links 完全一致的语义）
+  const reuse = env.db.prepare(
+    `SELECT id FROM direct_links
+     WHERE file_id = ?1 AND folder_path IS NULL AND revoked = 0
+       AND (expires_at IS NULL OR expires_at > ?2)
+       AND (max_downloads IS NULL OR download_count < max_downloads)
+     ORDER BY created_at DESC LIMIT 1`
+  );
+  eq((await reuse.bind(fActive, Date.now()).first())?.id, "dl-a1", "复用判定：有效直链命中");
+  eq(await reuse.bind(fRevoked, Date.now()).first(), null, "复用判定：仅撤销 → 不复用（新建）");
+  eq(await reuse.bind(fExpired, Date.now()).first(), null, "复用判定：仅过期 → 不复用");
+  eq(await reuse.bind(fMaxed, Date.now()).first(), null, "复用判定：仅满额 → 不复用");
+  eq((await reuse.bind(fMulti, Date.now()).first())?.id, "dl-x2", "复用判定：多条取最新有效");
+  const folderReuse = env.db.prepare(
+    `SELECT id FROM direct_links
+     WHERE folder_path = ?1 AND revoked = 0
+       AND (expires_at IS NULL OR expires_at > ?2)
+       AND (max_downloads IS NULL OR download_count < max_downloads)
+     ORDER BY created_at DESC LIMIT 1`
+  );
+  eq((await folderReuse.bind("/docs", Date.now()).first())?.id, "fl-doc1", "复用判定：文件夹直链命中");
+  eq(await folderReuse.bind("/dead", Date.now()).first(), null, "复用判定：文件夹撤销 → 不复用");
+}
+
 console.log(`\n══════════ 结果: ${passed} 通过, ${failed} 失败 ══════════`);
 process.exit(failed > 0 ? 1 : 0);

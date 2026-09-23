@@ -935,6 +935,20 @@ export async function handleAdminApi(
     const id = randomId(12);
 
     let url: string;
+    // 幂等复用：同一目标已有"有效"直链（未撤销/未过期/未达次数上限）时，
+    // 直接返回已有链接，保证直链地址首次生成后固定不变。
+    const findActive = (where: string, bind: string) =>
+      env.db
+        .prepare(
+          `SELECT id, download_name FROM direct_links
+           WHERE ${where} AND revoked = 0
+             AND (expires_at IS NULL OR expires_at > ?2)
+             AND (max_downloads IS NULL OR download_count < max_downloads)
+           ORDER BY created_at DESC LIMIT 1`
+        )
+        .bind(bind, Date.now())
+        .first<{ id: string; download_name: string | null }>();
+
     if (body.folder_path) {
       // 文件夹直链
       const norm = normalizeDirPath(body.folder_path);
@@ -942,6 +956,8 @@ export async function handleAdminApi(
         return json({ error: msg(req, "文件夹路径不合法", "Invalid folder path") }, 400);
       if (!(await dirExists(env, norm)))
         return json({ error: msg(req, "文件夹不存在", "Folder not found") }, 404);
+      const existing = await findActive("folder_path = ?1", norm);
+      if (existing) return json({ ok: true, reused: true, id: existing.id, url: `/d/${existing.id}` });
       await env.db.prepare(
         `INSERT INTO direct_links(id, file_id, created_at, expires_at, max_downloads, download_name, notes, folder_path)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
@@ -954,6 +970,9 @@ export async function handleAdminApi(
       if (!body.file_id) return json({ error: msg(req, "缺少 file_id 或 folder_path", "Missing file_id or folder_path") }, 400);
       const file = await env.db.prepare("SELECT id, name FROM files WHERE id = ?1").bind(body.file_id).first<{ id: string; name: string }>();
       if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
+      const existing = await findActive("file_id = ?1 AND folder_path IS NULL", body.file_id);
+      if (existing)
+        return json({ ok: true, reused: true, id: existing.id, url: buildDirectUrl(existing.id, file.name, existing.download_name) });
       await env.db.prepare(
         `INSERT INTO direct_links(id, file_id, created_at, expires_at, max_downloads, download_name, notes)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)`
