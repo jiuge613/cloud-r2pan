@@ -45,6 +45,7 @@ export interface ShareRow {
 export interface DirectLinkRow {
   /** 直链 token（/d/:id） */
   id: string;
+  /** 关联文件 ID；文件夹直链为空字符串（folder_path 优先） */
   file_id: string;
   created_at: number;
   expires_at: number | null;
@@ -55,13 +56,16 @@ export interface DirectLinkRow {
   download_name: string | null;
   /** 管理员备注 */
   notes: string | null;
+  /** 文件夹直链：指向的目录路径（"/" 除外）；为 null 时是文件直链 */
+  folder_path?: string | null;
 }
 
 export interface DirectLinkWithFile extends DirectLinkRow {
-  key: string;
-  name: string;
-  size: number;
-  mime: string;
+  /** 文件直链才有值；文件夹直链为 null */
+  key: string | null;
+  name: string | null;
+  size: number | null;
+  mime: string | null;
 }
 
 export interface FileRow {

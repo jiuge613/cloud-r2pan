@@ -8,6 +8,15 @@ import { hashPassword } from "./public";
 import { parseUA } from "./ua";
 import { encryptSecret, decryptSecret, totpGenerateSecret, totpVerify, totpUri, totpGenerateRecoveryCodes, sha256Hex, safeEqual } from "./crypto";
 import { createStorageProvider, type StorageProvider } from "./storage";
+import {
+  normalizeDirPath,
+  validateFolderName,
+  dirExists,
+  listFolder,
+  folderStats,
+  deleteFolderRecursive,
+  joinDirPath,
+} from "./folders";
 
 /** 懒加载 StorageProvider —— 每次需要时从 settings 构造（settings 有 5s 缓存，成本低） */
 let _storagePromise: Promise<StorageProvider> | null = null;
@@ -303,15 +312,15 @@ export async function handleAdminApi(
     });
   }
 
-  // ── 文件列表 ──────────────────────────────────────
+  // ── 文件列表（按目录浏览）──────────────────────────
+  // GET /api/admin/files?path=/foo → { path, folders, files }（当前目录的直接子项）
+  // 兼容：不带 path 参数 → 根目录
   if (path === "/api/admin/files" && method === "GET") {
-    const { results } = await env.db.prepare(
-      `SELECT f.id, f.name, f.size, f.mime, f.uploaded_at,
-              (SELECT COUNT(*) FROM shares s WHERE s.file_id = f.id) AS share_count,
-              (SELECT COALESCE(SUM(s.download_count), 0) FROM shares s WHERE s.file_id = f.id) AS download_count
-       FROM files f ORDER BY f.uploaded_at DESC`
-    ).all();
-    return json({ files: results ?? [] });
+    const rawPath = url.searchParams.get("path") ?? "/";
+    const norm = normalizeDirPath(rawPath);
+    if (norm === null) return json({ error: msg(req, "路径不合法", "Invalid path") }, 400);
+    const listing = await listFolder(env, norm);
+    return json(listing);
   }
 
   // ── 上传文件（原始流式 body，文件名放 X-File-Name 头） ──
@@ -325,6 +334,18 @@ export async function handleAdminApi(
       name = sanitizeName(rawName);
     }
     if (!req.body) return json({ error: msg(req, "请求体为空", "Empty request body") }, 400);
+    // 可选：上传到指定目录（管理后台按目录浏览时带上当前目录，头内路径已 URL 编码）
+    let dirPath = "/";
+    {
+      const rawDir = req.headers.get("x-file-path");
+      if (rawDir) {
+        let decoded = rawDir;
+        try { decoded = decodeURIComponent(rawDir); } catch { /* 保持原值 */ }
+        const norm = normalizeDirPath(decoded);
+        if (norm === null) return json({ error: msg(req, "目标目录路径不合法", "Invalid target directory path") }, 400);
+        dirPath = norm;
+      }
+    }
     const id = randomId(14);
     const key = `files/${id}`;
     const mime = req.headers.get("content-type") || "application/octet-stream";
@@ -342,16 +363,16 @@ export async function handleAdminApi(
     // ── Bug #4 修复：D1 写入失败时清理已写入的 storage 对象 ──
     try {
       await env.db.prepare(
-        "INSERT INTO files(id, key, name, size, mime, uploaded_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)"
+        "INSERT INTO files(id, key, name, size, mime, path, uploaded_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)"
       )
-        .bind(id, key, name, resultSize, mime, Date.now())
+        .bind(id, key, name, resultSize, mime, dirPath, Date.now())
         .run();
     } catch (dbErr) {
       ctx.waitUntil(st.delete(key).catch(() => {}));
       console.error("upload: D1 insert failed, cleaned up storage object:", dbErr);
       return json({ error: msg(req, "数据库写入失败，请重试", "Database write failed. Please retry.") }, 500);
     }
-    return json({ ok: true, id, name, size: resultSize }, 201);
+    return json({ ok: true, id, name, size: resultSize, path: dirPath }, 201);
   }
 
   // ── 删除文件（连带存储对象、分享、日志） ──────────
@@ -362,12 +383,81 @@ export async function handleAdminApi(
     if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
     await env.db.batch([
       env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(fileId),
+      env.db.prepare("DELETE FROM direct_links WHERE file_id = ?1").bind(fileId),
       env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(fileId),
       env.db.prepare("DELETE FROM files WHERE id = ?1").bind(fileId),
     ]);
     const st = await storage(env);
     ctx.waitUntil(st.delete(file.key).catch(() => {}));
     return json({ ok: true });
+  }
+
+  // ══════════════════════════════════════════════════════
+  // 文件夹管理 —— 虚拟目录（与 WebDAV 的 directories/files.path 模型一致）
+  //   POST   /api/admin/folders            新建文件夹 { parent, name }
+  //   GET    /api/admin/folders/stats      递归统计 ?path=（删除确认弹窗用）
+  //   DELETE /api/admin/folders            递归删除 ?path=（连带文件/子目录/分享/直链/日志/存储对象）
+  // ══════════════════════════════════════════════════════
+
+  // ── 新建文件夹 ──
+  if (path === "/api/admin/folders" && method === "POST") {
+    const body = await readJson<{ parent?: string; name?: string }>(req);
+    const parent = normalizeDirPath(body.parent ?? "/");
+    if (parent === null) return json({ error: msg(req, "父目录路径不合法", "Invalid parent path") }, 400);
+    const nameError = validateFolderName(String(body.name ?? ""));
+    if (nameError) return json({ error: msg(req, nameError, nameError) }, 400);
+    const name = String(body.name).trim();
+
+    // 父目录必须存在
+    if (!(await dirExists(env, parent)))
+      return json({ error: msg(req, "父目录不存在", "Parent directory not found") }, 404);
+
+    const fullPath = joinDirPath(parent, name);
+
+    // 重名校验：与显式目录、同目录下的文件都不得冲突
+    const dupDir = await env.db.prepare("SELECT 1 FROM directories WHERE path = ?1").bind(fullPath).first();
+    if (dupDir) return json({ error: msg(req, "同名文件夹已存在", "A folder with this name already exists") }, 409);
+    const dupFile = await env.db.prepare("SELECT 1 FROM files WHERE path = ?1 LIMIT 1").bind(fullPath).first();
+    if (dupFile) return json({ error: msg(req, "已存在同名文件", "A file with this name already exists") }, 409);
+
+    try {
+      await env.db.prepare(
+        "INSERT INTO directories(path, created_at) VALUES(?1, ?2)"
+      ).bind(fullPath, Date.now()).run();
+    } catch {
+      return json({ error: msg(req, "同名文件夹已存在", "A folder with this name already exists") }, 409);
+    }
+    return json({ ok: true, path: fullPath }, 201);
+  }
+
+  // ── 递归统计（删除确认弹窗展示将删除的内容量） ──
+  if (path === "/api/admin/folders/stats" && method === "GET") {
+    const raw = url.searchParams.get("path") ?? "";
+    const norm = normalizeDirPath(raw);
+    if (norm === null || norm === "/")
+      return json({ error: msg(req, "路径不合法", "Invalid path") }, 400);
+    if (!(await dirExists(env, norm)))
+      return json({ error: msg(req, "文件夹不存在", "Folder not found") }, 404);
+    const stats = await folderStats(env, norm);
+    return json({ path: norm, ...stats });
+  }
+
+  // ── 递归删除文件夹 ──
+  if (path === "/api/admin/folders" && method === "DELETE") {
+    const raw = url.searchParams.get("path") ?? "";
+    const norm = normalizeDirPath(raw);
+    if (norm === null || norm === "/")
+      return json({ error: msg(req, "路径不合法（根目录不可删除）", "Invalid path (cannot delete root)") }, 400);
+    const result = await deleteFolderRecursive(env, norm);
+    if (!result) return json({ error: msg(req, "文件夹不存在", "Folder not found") }, 404);
+    // 存储对象异步删除，不阻塞响应（与单文件删除行为一致）
+    if (result.storageKeys.length > 0) {
+      const st = await storage(env);
+      ctx.waitUntil((async () => {
+        for (const key of result.storageKeys) await st.delete(key).catch(() => {});
+      })());
+    }
+    return json({ ok: true, files: result.files, folders: result.folders, bytes: result.bytes });
   }
 
   // ── 存储浏览（S3 / R2 bucket 内对象列表） ─────────
@@ -824,18 +914,16 @@ export async function handleAdminApi(
   //   DELETE /api/admin/direct-links/:id        删除
   // ══════════════════════════════════════════════════════
 
-  // ── 创建直链 ──
+  // ── 创建直链（文件直链 / 文件夹直链二选一） ──
   if (path === "/api/admin/direct-links" && method === "POST") {
     const body = await readJson<{
-      file_id: string;
+      file_id?: string;
+      folder_path?: string | null;
       expires_hours: number | null;
       max_downloads: number | null;
       download_name?: string | null;
       notes?: string | null;
     }>(req);
-    if (!body.file_id) return json({ error: msg(req, "缺少 file_id", "Missing file_id") }, 400);
-    const file = await env.db.prepare("SELECT id, name FROM files WHERE id = ?1").bind(body.file_id).first<{ id: string; name: string }>();
-    if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
     const expiresAt =
       body.expires_hours && body.expires_hours > 0 ? Date.now() + body.expires_hours * 3600_000 : null;
     const maxDownloads =
@@ -845,44 +933,73 @@ export async function handleAdminApi(
     const notes =
       typeof body.notes === "string" && body.notes.trim() ? body.notes.trim().slice(0, 200) : null;
     const id = randomId(12);
-    await env.db.prepare(
-      `INSERT INTO direct_links(id, file_id, created_at, expires_at, max_downloads, download_name, notes)
-       VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)`
-    )
-      .bind(id, body.file_id, Date.now(), expiresAt, maxDownloads, downloadName, notes)
-      .run();
-    return json({ ok: true, id, url: buildDirectUrl(id, file.name, downloadName) }, 201);
+
+    let url: string;
+    if (body.folder_path) {
+      // 文件夹直链
+      const norm = normalizeDirPath(body.folder_path);
+      if (norm === null || norm === "/")
+        return json({ error: msg(req, "文件夹路径不合法", "Invalid folder path") }, 400);
+      if (!(await dirExists(env, norm)))
+        return json({ error: msg(req, "文件夹不存在", "Folder not found") }, 404);
+      await env.db.prepare(
+        `INSERT INTO direct_links(id, file_id, created_at, expires_at, max_downloads, download_name, notes, folder_path)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+      )
+        .bind(id, "", Date.now(), expiresAt, maxDownloads, downloadName, notes, norm)
+        .run();
+      url = `/d/${id}`;
+    } else {
+      // 文件直链（原有逻辑）
+      if (!body.file_id) return json({ error: msg(req, "缺少 file_id 或 folder_path", "Missing file_id or folder_path") }, 400);
+      const file = await env.db.prepare("SELECT id, name FROM files WHERE id = ?1").bind(body.file_id).first<{ id: string; name: string }>();
+      if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
+      await env.db.prepare(
+        `INSERT INTO direct_links(id, file_id, created_at, expires_at, max_downloads, download_name, notes)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+      )
+        .bind(id, body.file_id, Date.now(), expiresAt, maxDownloads, downloadName, notes)
+        .run();
+      url = buildDirectUrl(id, file.name, downloadName);
+    }
+    return json({ ok: true, id, url }, 201);
   }
 
-  // ── 直链列表 ──
+  // ── 直链列表（LEFT JOIN 兼容文件夹直链） ──
   if (path === "/api/admin/direct-links" && method === "GET") {
-    const q = new URL(req.url).searchParams.get("q")?.trim();
+    const q = url.searchParams.get("q")?.trim();
     const where = q
-      ? ` AND (f.name LIKE ?1 OR COALESCE(dl.notes,'') LIKE ?1)`
+      ? ` AND (COALESCE(f.name, dl.folder_path, '') LIKE ?1 OR COALESCE(dl.notes,'') LIKE ?1)`
       : "";
     const bindVals = q ? [`%${q}%`] : [];
     const { results } = await env.db
       .prepare(
         `SELECT dl.id, dl.file_id, dl.created_at, dl.expires_at, dl.max_downloads, dl.download_count, dl.revoked,
-                dl.download_name, dl.notes,
+                dl.download_name, dl.notes, dl.folder_path,
                 f.name AS file_name, f.size AS file_size, f.mime AS file_mime
-         FROM direct_links dl JOIN files f ON f.id = dl.file_id
+         FROM direct_links dl LEFT JOIN files f ON f.id = dl.file_id AND dl.folder_path IS NULL
          WHERE 1=1 ${where}
          ORDER BY dl.created_at DESC`
       )
       .all();
     const now = Date.now();
-    const list = (results ?? []).map((dl: any) => ({
-      ...dl,
-      url: buildDirectUrl(dl.id, dl.file_name, dl.download_name),
-      status: dl.revoked
-        ? "revoked"
-        : dl.expires_at && dl.expires_at < now
-          ? "expired"
-          : dl.max_downloads && dl.download_count >= dl.max_downloads
-            ? "maxed"
-            : "active",
-    }));
+    const list = (results ?? []).map((dl: any) => {
+      const isFolder = !!dl.folder_path;
+      const displayName = isFolder ? dl.folder_path : dl.file_name;
+      return {
+        ...dl,
+        type: isFolder ? "folder" : "file",
+        file_name: displayName,
+        url: isFolder ? `/d/${dl.id}` : buildDirectUrl(dl.id, dl.file_name, dl.download_name),
+        status: dl.revoked
+          ? "revoked"
+          : dl.expires_at && dl.expires_at < now
+            ? "expired"
+            : dl.max_downloads && dl.download_count >= dl.max_downloads
+              ? "maxed"
+              : "active",
+      };
+    });
     return json({ direct_links: list });
   }
 
@@ -895,13 +1012,15 @@ export async function handleAdminApi(
       const row = await env.db
         .prepare(
           `SELECT dl.*, f.name AS file_name, f.size AS file_size, f.mime AS file_mime
-           FROM direct_links dl JOIN files f ON f.id = dl.file_id
+           FROM direct_links dl LEFT JOIN files f ON f.id = dl.file_id AND dl.folder_path IS NULL
            WHERE dl.id = ?1`
         )
         .bind(dlId)
         .first();
       if (!row) return json({ error: msg(req, "直链不存在", "Direct link not found") }, 404);
-      return json({ ...row, url: buildDirectUrl((row as any).id, (row as any).file_name, (row as any).download_name) });
+      const r = row as any;
+      const url = r.folder_path ? `/d/${r.id}` : buildDirectUrl(r.id, r.file_name, r.download_name);
+      return json({ ...r, type: r.folder_path ? "folder" : "file", url });
     }
 
     if (method === "PUT") {
@@ -1638,7 +1757,7 @@ export async function handleAdminApi(
         const prov = createS3Provider(cfg);
         const testKey = `_r2pan-test-${Date.now()}`;
         // 写一个测试对象
-        await prov.put(testKey, new TextEncoder().encode("cloud-r2pan storage test").buffer, {
+        await prov.put(testKey, new TextEncoder().encode("cloud-r2pan storage test").buffer as ArrayBuffer, {
           contentType: "text/plain",
         });
         // 读回验证

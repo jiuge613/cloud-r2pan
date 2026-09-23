@@ -4,3 +4,11 @@ node_modules/
 .env
 dist/
 *.log
+
+# editor / agent artifacts + test build output
+*.bak
+*.orig
+.trae-html-share-packages/
+uploads/
+_test/build/
+_test/build2/

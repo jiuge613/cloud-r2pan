@@ -3,10 +3,11 @@ import { getSettings, addTraffic } from "./settings";
 import { parseUA } from "./ua";
 import { clientIp, isAdminWhitelisted } from "./auth";
 import { findCodeByString, checkCodeUsable, activateCodeIfNeeded, deductQuota, formatCodeStatus } from "./codes";
-import { errorPage, json } from "./pages";
+import { errorPage, json, folderListPage } from "./pages";
 import { hmacHex, sha256Hex, randomHex, safeEqual, decryptSecret } from "./crypto";
 import { verifyOAuthSession } from "./oauth";
 import { createStorageProvider, type StorageProvider } from "./storage";
+import { listFolder, resolveInsideFolder, dirExists } from "./folders";
 
 /** 懒加载 StorageProvider —— 和 admin.ts 类似 */
 let _storagePromise: Promise<StorageProvider> | null = null;
@@ -247,12 +248,12 @@ async function getShare(env: Env, token: string): Promise<ShareWithFile | null> 
     .first<ShareWithFile>();
 }
 
-/** 从 direct_links 表查直链记录（独立表、独立 token） */
+/** 从 direct_links 表查直链记录（独立表、独立 token；LEFT JOIN 兼容文件夹直链） */
 async function getDirectLink(env: Env, token: string): Promise<DirectLinkWithFile | null> {
   return await env.db.prepare(
     `SELECT dl.id, dl.file_id, dl.created_at, dl.expires_at, dl.max_downloads, dl.download_count, dl.revoked,
-            dl.download_name, f.key, f.name, f.size, f.mime
-     FROM direct_links dl JOIN files f ON f.id = dl.file_id
+            dl.download_name, dl.notes, dl.folder_path, f.key, f.name, f.size, f.mime
+     FROM direct_links dl LEFT JOIN files f ON f.id = dl.file_id
      WHERE dl.id = ?1`
   )
     .bind(token)
@@ -435,6 +436,199 @@ export async function handleDownload(
 }
 
 /**
+ * GET /d/:id —— 直链统一入口（index.ts 路由分发到这里）
+ *   文件直链：/d/:token 或 /d/:token/{filename} → 原文件流式下载（原有行为）
+ *   文件夹直链：/d/:token            → 目录浏览列表页（可继续进入子目录）
+ *              /d/:token/download?p= → 下载目录内某个文件（路径受控，防穿越）
+ */
+export async function handleDirect(
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  token: string,
+  sub = ""
+): Promise<Response> {
+  const row = await getDirectLink(env, token);
+  if (row?.folder_path) {
+    if (sub === "/download") return handleDirectFolderDownload(req, env, ctx, token, row);
+    if (sub === "" || sub === "/") return handleDirectFolderPage(req, env, token, row);
+    return errorPage(req, 404, { zh: "页面不存在", en: "Not Found" },
+      { zh: "该直链地址无效。", en: "This direct link address is invalid." });
+  }
+  return handleDirectDownload(req, env, ctx, token, row);
+}
+
+/** 文件夹直链通用的有效性校验（封禁 / 撤销 / 过期 / 满额），失败返回错误页 */
+async function guardFolderLink(
+  req: Request,
+  env: Env,
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  row: DirectLinkWithFile
+): Promise<Response | null> {
+  const ip = clientIp(req);
+  const ban = await env.db.prepare("SELECT reason, expires_at FROM banned_ips WHERE ip = ?1")
+    .bind(ip).first<{ reason: string | null; expires_at: number | null }>();
+  if (ban) {
+    if (ban.expires_at && ban.expires_at < Date.now()) {
+      env.db.prepare("DELETE FROM banned_ips WHERE ip = ?1").bind(ip).run().catch(() => {});
+    } else {
+      return errorPage(req, 403, { zh: "访问已被封禁", en: "Access Banned" },
+        { zh: ban.reason || "该 IP 已被暂时封禁。", en: ban.reason || "This IP has been banned." });
+    }
+  }
+  if (row.revoked) return errorPage(req, 410, { zh: "直链已失效", en: "Link Revoked" },
+    { zh: "该直链已被撤销。", en: "Direct link revoked." });
+  if (row.expires_at && row.expires_at < Date.now()) return errorPage(req, 410, { zh: "直链已过期", en: "Link Expired" },
+    { zh: "该直链已超过有效期。", en: "Direct link expired." });
+  if (row.max_downloads && row.download_count >= row.max_downloads)
+    return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
+      { zh: `名额已用完。`, en: `Quota used up.` });
+  void settings;
+  return null;
+}
+
+/** 文件夹直链 —— 列表页（不计数、不耗流量；空文件夹显示空态） */
+async function handleDirectFolderPage(
+  req: Request,
+  env: Env,
+  token: string,
+  row: DirectLinkWithFile
+): Promise<Response> {
+  const settings = await getSettings(env);
+  const guard = await guardFolderLink(req, env, settings, row);
+  if (guard) return guard;
+
+  const folderPath = row.folder_path!;
+  // 解析 ?p= 内部子路径（构造性防穿越；非法一律回退到根，避免泄露存在性）
+  const raw = new URL(req.url).searchParams.get("p");
+  let current = resolveInsideFolder(folderPath, raw);
+  if (current === null) current = folderPath;
+
+  if (!(await dirExists(env, current))) {
+    // 目录在创建直链后被删除 / 改名
+    return errorPage(req, 404, { zh: "文件夹不存在", en: "Folder Not Found" },
+      { zh: "该文件夹可能已被管理员删除。", en: "This folder may have been deleted." });
+  }
+
+  const listing = await listFolder(env, current);
+  const stripRoot = (p: string) =>
+    folderPath === "/" ? p : p.startsWith(folderPath + "/") ? p.slice(folderPath.length + 1) : p;
+
+  return folderListPage(req, {
+    siteTitle: settings.siteTitle,
+    token,
+    folderPath,
+    displayName: row.download_name || (folderPath === "/" ? "/" : folderPath.split("/").filter(Boolean).pop()!),
+    currentPath: current,
+    folders: listing.folders.map((f) => ({ name: f.name, sub: stripRoot(f.path) })),
+    files: listing.files.map((f) => ({ name: f.name, size: f.size, mime: f.mime, sub: stripRoot(current + "/" + f.name) })),
+    expiresAt: row.expires_at,
+    maxDownloads: row.max_downloads,
+    downloadCount: row.download_count,
+  });
+}
+
+/** 文件夹直链 —— 目录内文件下载（与文件直链相同的拦截链 + 原子计数 + 日志/流量） */
+async function handleDirectFolderDownload(
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  token: string,
+  row: DirectLinkWithFile
+): Promise<Response> {
+  const ip = clientIp(req);
+  const settings = await getSettings(env);
+
+  // 激活码（与文件直链保持一致的可选支持）
+  const urlCode = new URL(req.url).searchParams.get("code");
+  const headerCode = req.headers.get("x-activation-code");
+  const activationCode = (urlCode || headerCode || "").trim().toUpperCase() || null;
+  const codeRow = activationCode ? await findCodeByString(env, activationCode) : null;
+  if (activationCode && codeRow) {
+    const check = checkCodeUsable(codeRow as any);
+    if (!check.ok) {
+      return errorPage(req, 403,
+        { zh: "激活码不可用", en: "Activation Code Unavailable" },
+        { zh: check.message || check.reason || "该激活码不可用", en: check.message || "This activation code is not available" },
+        { siteTitle: settings.siteTitle });
+    }
+    activateCodeIfNeeded(env, codeRow!).catch(() => {});
+  }
+
+  const guard = await guardFolderLink(req, env, settings, row);
+  if (guard) return guard;
+
+  // 原子扣次（与文件直链同一语句模式，防并发超卖）
+  if (row.max_downloads) {
+    const r = await env.db.prepare(
+      `UPDATE direct_links SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
+    ).bind(token, row.max_downloads).run();
+    if ((r.meta.changes ?? 0) === 0)
+      return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
+        { zh: `名额已用完。`, en: `Quota used up.` });
+  }
+
+  // 流量限额
+  {
+    const whitelisted = isAdminWhitelisted(ip, settings.adminIps);
+    if (!whitelisted && !codeRow && settings.trafficLimitBytes > 0 && settings.trafficUsedBytes >= settings.trafficLimitBytes) {
+      return errorPage(req, 503, { zh: "下载已暂停", en: "Downloads Paused" },
+        { zh: "本月流量已达预设限额。", en: "Monthly traffic quota reached." },
+        { siteTitle: settings.siteTitle });
+    }
+  }
+
+  // 单 IP 重复下载限制（同一文件夹直链维度统计）
+  {
+    const whitelisted = isAdminWhitelisted(ip, settings.adminIps);
+    if (!whitelisted && !codeRow && settings.maxDownloadsPerIp > 0) {
+      const since = settings.countWindowHours > 0 ? Date.now() - settings.countWindowHours * 3600_000 : 0;
+      const { c } = (await env.db.prepare(
+        "SELECT COUNT(*) AS c FROM download_logs WHERE share_id = ?1 AND ip = ?2 AND created_at > ?3"
+      ).bind(token, ip, since).first<{ c: number }>()) ?? { c: 0 };
+      if (c >= settings.maxDownloadsPerIp) {
+        if (settings.autoBan) {
+          const expiresAt = settings.banHours > 0 ? Date.now() + settings.banHours * 3600_000 : null;
+          await env.db.prepare(
+            `INSERT INTO banned_ips(ip, reason, banned_at, expires_at) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, banned_at = excluded.banned_at, expires_at = excluded.expires_at`
+          ).bind(ip, `重复下载直链文件夹「${row.download_name || row.folder_path}」超过 ${settings.maxDownloadsPerIp} 次`, Date.now(), expiresAt).run();
+        }
+        return errorPage(req, 403, { zh: "重复下载被拦截", en: "Duplicate Download Blocked" },
+          { zh: `同一 IP 在统计窗口内的下载次数已达上限。`, en: `IP download limit reached.` },
+          { siteTitle: settings.siteTitle });
+      }
+    }
+  }
+
+  // 解析目录内文件路径 —— 防穿越；指向文件夹或不存在的路径都拒绝
+  const folderPath = row.folder_path!;
+  const raw = new URL(req.url).searchParams.get("p");
+  const fullPath = resolveInsideFolder(folderPath, raw);
+  if (fullPath === null || fullPath === folderPath) {
+    return errorPage(req, 400, { zh: "无法下载", en: "Cannot Download" },
+      { zh: "请从列表页选择要下载的文件。", en: "Please pick a file from the folder listing." });
+  }
+  const fileRow = await env.db.prepare(
+    "SELECT id, key, name, size, mime FROM files WHERE path = ?1"
+  ).bind(fullPath).first<{ id: string; key: string; name: string; size: number; mime: string }>();
+  if (!fileRow) {
+    // 可能指向的是子文件夹
+    const isDir = await dirExists(env, fullPath);
+    return errorPage(req, 404, { zh: "文件不存在", en: "File Not Found" },
+      { zh: isDir ? "该路径是文件夹，请在列表页进入后下载其中的文件。" : "文件可能已被删除。", en: isDir ? "This path is a folder — open it in the listing to download files inside." : "File may have been deleted." });
+  }
+
+  return streamFile(req, env, ctx, {
+    file_id: fileRow.id,
+    key: fileRow.key,
+    name: fileRow.name,
+    size: fileRow.size,
+    mime: fileRow.mime,
+  }, token, "direct");
+}
+
+/**
  * GET /d/:id —— 直链下载（独立入口，走 direct_links 表）
  * 轻量鉴权：封禁 → 过期/撤销/次数 → 原子扣次 → 流量限额 → 重复下载
  * 不走密码/Turnstile/OAuth（直链设计就是"拿了就能下"）
@@ -443,7 +637,8 @@ export async function handleDirectDownload(
   req: Request,
   env: Env,
   ctx: ExecutionContext,
-  token: string
+  token: string,
+  prefetched?: DirectLinkWithFile | null
 ): Promise<Response> {
   const ip = clientIp(req);
   const ua = req.headers.get("user-agent") ?? "";
@@ -454,12 +649,14 @@ export async function handleDirectDownload(
   const headerCode = req.headers.get("x-activation-code");
   const activationCode = (urlCode || headerCode || "").trim().toUpperCase() || null;
 
-  const [codeRow, ban, row] = await Promise.all([
+  const [codeRow, ban, dlRow] = await Promise.all([
     activationCode ? findCodeByString(env, activationCode) : Promise.resolve(null),
     env.db.prepare("SELECT reason, expires_at FROM banned_ips WHERE ip = ?1")
       .bind(ip).first<{ reason: string | null; expires_at: number | null }>(),
-    getDirectLink(env, token),
+    prefetched !== undefined ? Promise.resolve(prefetched) : getDirectLink(env, token),
   ]);
+  // 文件夹直链不走文件下载流程（由 handleDirect 分发）
+  const row = dlRow && dlRow.folder_path ? null : dlRow;
 
   if (activationCode && codeRow) {
     const check = checkCodeUsable(codeRow as any);
@@ -523,7 +720,7 @@ export async function handleDirectDownload(
           await env.db.prepare(
             `INSERT INTO banned_ips(ip, reason, banned_at, expires_at) VALUES(?1, ?2, ?3, ?4)
              ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, banned_at = excluded.banned_at, expires_at = excluded.expires_at`
-          ).bind(ip, `重复下载直链「${row.name}」超过 ${settings.maxDownloadsPerIp} 次`, Date.now(), expiresAt).run();
+          ).bind(ip, `重复下载直链「${row.name ?? "文件"}」超过 ${settings.maxDownloadsPerIp} 次`, Date.now(), expiresAt).run();
         }
         return errorPage(req, 403, { zh: "重复下载被拦截", en: "Duplicate Download Blocked" },
           { zh: `同一 IP 在统计窗口内下载此资源的次数已达上限。`, en: `IP download limit reached.` },
@@ -532,7 +729,15 @@ export async function handleDirectDownload(
     }
   }
 
-  return streamFile(req, env, ctx, row, token, "direct");
+  // 文件直链的文件信息必然存在（folder_path 为 null 时 LEFT JOIN 一定命中 files）
+  return streamFile(req, env, ctx, {
+    file_id: row.file_id,
+    key: row.key!,
+    name: row.name!,
+    size: row.size!,
+    mime: row.mime!,
+    download_name: row.download_name,
+  }, token, "direct");
 }
 
 /* ════════════════════════════════════════════════════════════════════

@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { ensureSchema } from "./db";
 import { handleAdminApi } from "./admin";
-import { handleDownload, handleDirectDownload, handleShareInfo, handleVerify } from "./public";
+import { handleDownload, handleDirect, handleShareInfo, handleVerify } from "./public";
 import { serveAdminPage, serveSharePage, serveMarketPage, errorPage } from "./pages";
 import {
   handleOAuthStart,
@@ -262,16 +262,17 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   // ══════════════════════════════════════════════════════════════
   // 直链 /d/:id —— 独立入口，走 direct_links 表
   // 与分享链接 /s/:id 是完全独立的 API、独立的 token、独立的鉴权
-  // 创建直链: POST /api/admin/direct-links
-  // URL 格式：/d/{token}  或  /d/{token}/{filename}（带文件名后缀，向下兼容）
+  // 创建直链: POST /api/admin/direct-links（支持文件与文件夹）
+  // 文件直链 URL：/d/{token}  或  /d/{token}/{filename}（带文件名后缀，向下兼容）
+  // 文件夹直链：/d/{token}（列表页）、/d/{token}/download?p=...（目录内文件下载）
   // ══════════════════════════════════════════════════════════════
-  const directMatch = /^\/d\/([A-Za-z0-9]+)(?:\/.*)?$/.exec(path);
+  const directMatch = /^\/d\/([A-Za-z0-9]+)(\/.*)?$/.exec(path);
   if (directMatch) {
     if (req.method !== "GET" && req.method !== "HEAD") {
       return new Response("Method Not Allowed", { status: 405 });
     }
     await ensureSchema(env);
-    return handleDirectDownload(req, env, ctx, directMatch[1]);
+    return handleDirect(req, env, ctx, directMatch[1], directMatch[2] ?? "");
   }
 
   // ══════════════════════════════════════════════════════════════

@@ -661,6 +661,18 @@ const I18N = {
     allFiles: '全部文件', noFiles: '还没有文件，上传一个试试', createShare: '创建分享', createDirect: '创建直链', del: '删除',
     tooLarge: '「{name}」超过 100 MB 限制', uploadOk: '「{name}」上传成功', uploadFail: '「{name}」上传失败',
     uploadDone: '完成 ✅', uploadFailShort: '失败',
+    // 文件夹管理
+    newFolder: '新建文件夹', root: '根目录',
+    emptyDir: '此文件夹为空，上传文件或新建文件夹试试',
+    folderModalTitle: '新建文件夹', folderModalSub: '在当前目录下创建一个新文件夹',
+    folderName: '文件夹名称', folderNamePh: '如：项目资料 2024',
+    folderNameTip: '不能包含 \\ / : * ? " < > | 等字符，长度 ≤ 80，且不能与现有文件或文件夹重名',
+    folderCreated: '文件夹已创建', folderItems: '{n} 项',
+    deleteFolderT: '删除文件夹',
+    deleteFolderD: '确定删除「{name}」？将连同其中 {files} 个文件、{folders} 个子文件夹（共 {size}）一并删除，此操作不可恢复。',
+    folderDeleted: '文件夹已删除（{files} 个文件）',
+    folderDirectTitle: '创建文件夹直链', folderDirectSub: '访客可浏览目录内容列表，并下载其中的文件',
+    folderTag: '文件夹直链',
     // 分享弹窗
     shareModalTitle: '创建分享链接', shareModalSub: '生成公开下载链接，可设置有效期与下载次数上限',
     validity: '有效期', perm: '永久有效', h1: '1 小时', d1: '1 天', d7: '7 天', d30: '30 天',
@@ -1006,6 +1018,18 @@ const I18N = {
     allFiles: 'All Files', noFiles: 'No files yet — upload one to get started', createShare: 'Share', createDirect: 'Direct', del: 'Delete',
     tooLarge: '"{name}" exceeds the 100 MB limit', uploadOk: '"{name}" uploaded', uploadFail: '"{name}" upload failed',
     uploadDone: 'Done ✅', uploadFailShort: 'Failed',
+    // Folder management
+    newFolder: 'New Folder', root: 'Root',
+    emptyDir: 'This folder is empty — upload files or create a folder',
+    folderModalTitle: 'New Folder', folderModalSub: 'Create a new folder in the current directory',
+    folderName: 'Folder name', folderNamePh: 'e.g. Project 2024',
+    folderNameTip: 'Cannot contain \\ / : * ? " < > | , max 80 chars, must not duplicate an existing file or folder',
+    folderCreated: 'Folder created', folderItems: '{n} item(s)',
+    deleteFolderT: 'Delete folder',
+    deleteFolderD: 'Delete "{name}"? Its {files} file(s) and {folders} sub-folder(s) ({size} total) will be permanently removed. This cannot be undone.',
+    folderDeleted: 'Folder deleted ({files} files)',
+    folderDirectTitle: 'Create Folder Direct Link', folderDirectSub: 'Visitors can browse the folder listing and download files inside',
+    folderTag: 'Folder link',
     // 分享弹窗
     shareModalTitle: 'Create Share Link', shareModalSub: 'Generate a public download link with optional expiry and download cap',
     validity: 'Validity', perm: 'Forever', h1: '1 hour', d1: '1 day', d7: '7 days', d30: '30 days',
@@ -1798,9 +1822,23 @@ async function loadOverview(){
   $('#goto-logs').onclick = () => switchTab('logs');
 }
 
-/* ═══════════ 文件 ═══════════ */
+/* ═══════════ 文件（按目录浏览） ═══════════ */
+let filesPath = '/';
+
+function filesBreadcrumb(){
+  const parts = filesPath.split('/').filter(Boolean);
+  let html = `<a href="javascript:void(0)" data-bc="/" class="stg-bc" style="color:var(--blue);text-decoration:none">${esc(t('root'))}</a>`;
+  let acc = '';
+  for(const p of parts){
+    acc += '/' + p;
+    html += `<span style="opacity:.35;margin:0 6px">/</span><a href="javascript:void(0)" data-bc="${esc(acc)}" class="stg-bc" style="color:var(--blue);text-decoration:none">${esc(p)}</a>`;
+  }
+  return html;
+}
+
 async function loadFiles(){
-  const { files } = await api('/api/admin/files');
+  const r = await api('/api/admin/files?path=' + encodeURIComponent(filesPath));
+  const curName = filesPath === '/' ? t('root') : filesPath.split('/').filter(Boolean).pop();
   $('#view').innerHTML = `
     <div class="dropzone" id="dropzone">
       <div class="icon">☁️</div>
@@ -1810,11 +1848,33 @@ async function loadFiles(){
     </div>
     <div id="upload-list"></div>
     <div class="glass section">
-      <div class="section-title"><h2>📁 ${esc(t('allFiles'))}（${files.length}）</h2></div>
-      ${files.length ? `
+      <div class="section-title" style="flex-wrap:wrap;gap:10px">
+        <h2>📁 ${esc(t('allFiles'))}（${r.folders.length + r.files.length}）</h2>
+        <div style="flex:1"></div>
+        <button class="btn sm" id="mk-folder">➕ ${esc(t('newFolder'))}</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin:4px 0 10px;flex-wrap:wrap">
+        <span style="font-size:13px;opacity:.6;display:flex;align-items:center;gap:6px">📂 ${esc(curName)}</span>
+        <span id="files-bc" style="display:flex;align-items:center;flex-wrap:wrap">${filesBreadcrumb()}</span>
+      </div>
+      ${r.folders.length || r.files.length ? `
       <div style="overflow-x:auto"><table class="tbl">
-        <thead><tr><th style="width:44px"></th><th>${esc(t('colName'))}</th><th>${esc(t('colSize'))}</th><th>${esc(t('colShareCount'))}</th><th>${esc(t('colDownloads'))}</th><th>${esc(t('colUploaded'))}</th><th style="width:170px">${esc(t('colActions'))}</th></tr></thead>
-        <tbody>${files.map(f => `
+        <thead><tr><th style="width:44px"></th><th>${esc(t('colName'))}</th><th>${esc(t('colSize'))}</th><th>${esc(t('colShareCount'))}</th><th>${esc(t('colDownloads'))}</th><th>${esc(t('colUploaded'))}</th><th style="width:210px">${esc(t('colActions'))}</th></tr></thead>
+        <tbody>
+          ${r.folders.map(d => `
+          <tr>
+            <td>📁</td>
+            <td class="name-cell"><a href="javascript:void(0)" data-fopen="${esc(d.path)}" style="color:var(--text);text-decoration:none;font-weight:600">${esc(d.name)}</a></td>
+            <td class="num">${esc(t('folderItems', {n: d.file_count}))}</td>
+            <td class="num">—</td>
+            <td class="num">—</td>
+            <td class="num">—</td>
+            <td><div class="actions-cell">
+              <button class="btn sm" data-fdirect="${esc(d.path)}" style="background:rgba(250,204,21,0.15);border-color:rgba(250,204,21,0.35);color:#fde68a">${esc(t('createDirect'))}</button>
+              <button class="btn sm danger" data-fdel="${esc(d.path)}" data-fname="${esc(d.name)}">${esc(t('del'))}</button>
+            </div></td>
+          </tr>`).join('')}
+          ${r.files.map(f => `
           <tr>
             <td>${ficon(f.name)}</td>
             <td class="name-cell" title="${esc(f.name)}">${esc(f.name)}</td>
@@ -1829,7 +1889,7 @@ async function loadFiles(){
             </div></td>
           </tr>`).join('')}
         </tbody>
-      </table></div>` : `<div class="empty"><div class="icon">📭</div>${esc(t('noFiles'))}</div>`}
+      </table></div>` : `<div class="empty"><div class="icon">📭</div>${esc(t('emptyDir'))}</div>`}
     </div>`;
 
   const dz = $('#dropzone'), fi = $('#file-input');
@@ -1839,14 +1899,65 @@ async function loadFiles(){
   dz.ondrop = e => { e.preventDefault(); dz.classList.remove('over'); uploadFiles([...e.dataTransfer.files]); };
   fi.onchange = () => { uploadFiles([...fi.files]); fi.value = ''; };
 
+  $('#mk-folder').onclick = openFolderModal;
+  $$('#files-bc [data-bc]').forEach(a => a.onclick = () => { filesPath = a.dataset.bc; loadFiles(); });
+  $$('[data-fopen]').forEach(b => b.onclick = () => { filesPath = b.dataset.fopen; loadFiles(); });
+  $$('[data-fdirect]').forEach(b => b.onclick = () => openDirectModal(null, b.dataset.fdirect));
+  $$('[data-fdel]').forEach(b => b.onclick = () => deleteFolderFlow(b.dataset.fdel, b.dataset.fname));
   $$('[data-share]').forEach(b => b.onclick = () => openShareModal(b.dataset.share));
-  $$('[data-direct]').forEach(b => b.onclick = () => openDirectModal(b.dataset.direct));
+  $$('[data-direct]').forEach(b => b.onclick = () => openDirectModal(b.dataset.direct, null));
   $$('[data-del]').forEach(b => b.onclick = async () => {
     if(!(await confirmDialog(t('deleteFileT'), t('deleteFileD', {name: b.dataset.name})))) return;
     await api(`/api/admin/files/${b.dataset.del}`, { method:'DELETE' });
     toast(t('fileDeleted'));
     loadFiles();
   });
+}
+
+/* ═══════════ 新建文件夹弹窗 ═══════════ */
+function openFolderModal(){
+  openModal(`
+    <h3>${esc(t('folderModalTitle'))}</h3>
+    <div class="sub">${esc(t('folderModalSub'))}</div>
+    <div class="field">
+      <label>${esc(t('folderName'))}</label>
+      <input type="text" id="fd-name" placeholder="${esc(t('folderNamePh'))}" maxlength="80" autocomplete="off">
+      <div class="tip">${esc(t('folderNameTip'))}</div>
+    </div>
+    <div class="actions">
+      <button class="btn" data-x>${esc(t('cancel'))}</button>
+      <button class="btn primary" id="fd-create">${esc(t('confirm'))}</button>
+    </div>`);
+  $('[data-x]').onclick = closeModal;
+  const submit = async () => {
+    const name = $('#fd-name').value;
+    try{
+      await api('/api/admin/folders', { method:'POST', body: JSON.stringify({ parent: filesPath, name }) });
+      toast(t('folderCreated'));
+      closeModal();
+      loadFiles();
+    }catch(e){ toast(e.message, 'err'); }
+  };
+  $('#fd-create').onclick = submit;
+  $('#fd-name').onkeydown = e => { if(e.key === 'Enter') submit(); };
+  setTimeout(() => $('#fd-name')?.focus(), 50);
+}
+
+/* ═══════════ 删除文件夹（先取统计 → 二次确认 → 递归删除） ═══════════ */
+async function deleteFolderFlow(folderPath, name){
+  let stats;
+  try {
+    stats = await api('/api/admin/folders/stats?path=' + encodeURIComponent(folderPath));
+  } catch(e){ toast(e.message, 'err'); return; }
+  if(!(await confirmDialog(
+    t('deleteFolderT'),
+    t('deleteFolderD', { name, files: stats.files, folders: stats.folders, size: fmtSize(stats.bytes) })
+  ))) return;
+  try {
+    const r = await api('/api/admin/folders?path=' + encodeURIComponent(folderPath), { method:'DELETE' });
+    toast(t('folderDeleted', { files: r.files }));
+  } catch(e){ toast(e.message, 'err'); return; }
+  loadFiles();
 }
 
 function uploadFiles(files){
@@ -1860,6 +1971,7 @@ function uploadFiles(files){
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/admin/upload');
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+    xhr.setRequestHeader('X-File-Path', encodeURIComponent(filesPath));
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.upload.onprogress = e => {
       const pct = Math.round(e.loaded / e.total * 100);
@@ -1943,11 +2055,12 @@ function openShareModal(fileId){
 }
 
 
-/* ═══════════ 创建直链弹窗 ═══════════ */
-function openDirectModal(fileId){
+/* ═══════════ 创建直链弹窗（fileId 与 folderPath 二选一） ═══════════ */
+function openDirectModal(fileId, folderPath){
+  const isFolder = !!folderPath;
   openModal(`
-    <h3>${esc(t('directModalTitle'))}</h3>
-    <div class="sub">${esc(t('directModalSub'))}</div>
+    <h3>${esc(isFolder ? t('folderDirectTitle') : t('directModalTitle'))}</h3>
+    <div class="sub">${esc(isFolder ? t('folderDirectSub') : t('directModalSub'))}</div>
     <div class="field">
       <label>${esc(t('validity'))}</label>
       <select id="dl-exp" style="width:100%;padding:12px 14px;border-radius:14px;font-size:15px;font-family:inherit;color:var(--text);background:var(--sf-input);border:1px solid var(--stroke-strong);outline:none">
@@ -1963,11 +2076,12 @@ function openDirectModal(fileId){
       <input type="number" id="dl-max" min="0" placeholder="${esc(t('unlimitedPlaceholder'))}">
       <div class="tip">${esc(t('maxTip'))}</div>
     </div>
+    ${isFolder ? '' : `
     <div class="field">
       <label>${esc(t('downloadName'))}</label>
       <input type="text" id="dl-dlname" placeholder="${esc(t('downloadNamePh'))}">
       <div class="tip">${esc(t('downloadNameHint'))}</div>
-    </div>
+    </div>`}
     <div class="field">
       <label>${esc(t('directModalNotes'))}</label>
       <input type="text" id="dl-notes" placeholder="${esc(t('directModalNotesPh'))}">
@@ -1980,10 +2094,13 @@ function openDirectModal(fileId){
   $('#dl-create').onclick = async () => {
     const exp = Number($('#dl-exp').value) || null;
     const max = Number($('#dl-max').value) || null;
-    const download_name = $('#dl-dlname').value.trim() || null;
+    const download_name = isFolder ? null : ($('#dl-dlname')?.value.trim() || null);
     const notes = $('#dl-notes').value.trim() || null;
+    const payload = isFolder
+      ? { folder_path: folderPath, expires_hours: exp, max_downloads: max, notes }
+      : { file_id: fileId, expires_hours: exp, max_downloads: max, download_name, notes };
     try{
-      const r = await api('/api/admin/direct-links', { method:'POST', body: JSON.stringify({ file_id: fileId, expires_hours: exp, max_downloads: max, download_name, notes }) });
+      const r = await api('/api/admin/direct-links', { method:'POST', body: JSON.stringify(payload) });
       const url = location.origin + r.url;
       openModal(`
         <h3>${esc(t('directCreated'))}</h3>
@@ -2304,9 +2421,14 @@ async function loadDirectLinks(){
           <th>${esc(t('colCreated'))}</th><th>${esc(t('colStatus'))}</th>
           <th style="width:80px">${esc(t('colActions'))}</th>
         </tr></thead>
-        <tbody>${direct_links.map(d => `
+        <tbody>${direct_links.map(d => {
+          const isFolder = d.type === 'folder';
+          const nameCell = isFolder
+            ? `<span>📁</span> <span class="mono">${esc(d.file_name)}</span><div style="font-size:11px;color:#fde68a;margin-top:2px">${esc(t('folderTag'))}</div>`
+            : `${ficon(d.file_name)} ${esc(d.file_name)}${d.download_name && d.download_name !== d.file_name ? `<div style="font-size:11px;color:#6ee7b7;margin-top:2px">↳ ${esc(d.download_name)}</div>` : ''}`;
+          return `
           <tr>
-            <td class="name-cell">${ficon(d.file_name)} ${esc(d.file_name)}${d.download_name && d.download_name !== d.file_name ? `<div style="font-size:11px;color:#6ee7b7;margin-top:2px">↳ ${esc(d.download_name)}</div>` : ''}</td>
+            <td class="name-cell">${nameCell}</td>
             <td class="mono"><a href="/d/${d.id}" target="_blank" style="color:#fde68a;text-decoration:none">/d/${d.id}</a>
               <button class="btn sm" data-cdl="${location.origin}/d/${d.id}" style="padding:1px 6px;font-size:10px;margin-left:4px">📋</button></td>
             <td>${d.notes ? esc(d.notes) : '<span style="color:var(--text-3)">—</span>'}</td>
@@ -2314,7 +2436,8 @@ async function loadDirectLinks(){
             <td class="num">${fmtTime(d.created_at)}</td>
             <td><span class="tag ${d.status}"><i></i>${esc(t(STATUS_KEY[d.status]))}</span></td>
             <td><button class="btn sm danger" data-rvdl="${d.id}">${esc(t('revokeDirect'))}</button></td>
-          </tr>`).join('')}
+          </tr>`;
+        }).join('')}
         </tbody>
       </table></div>` : `<div class="empty"><div class="icon">🔗</div>${esc(t('noDirectLinks'))}</div>`}
     </div>`;

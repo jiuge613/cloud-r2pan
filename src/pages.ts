@@ -191,3 +191,170 @@ p { font-size: 15px; line-height: 1.65; color: rgba(255,255,255,.78); }
   addSecurityHeaders(headers);
   return new Response(html, { status, headers });
 }
+
+/* ═══════════ 文件夹直链列表页（服务端渲染，风格与错误页一致） ═══════════ */
+
+function fmtBytes(n: number): string {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + " " + u[i];
+}
+
+/** 文件扩展名 → 图标 emoji（与后台 EXT_COLORS 的分类语义对齐） */
+function fileEmoji(name: string): string {
+  const ext = (/\.([a-z0-9]+)$/i.exec(name || "") || [])[1]?.toLowerCase() ?? "";
+  if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return "🗜️";
+  if (["mp3", "wav", "flac", "m4a"].includes(ext)) return "🎵";
+  if (["mp4", "mov", "mkv", "avi"].includes(ext)) return "🎬";
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return "🖼️";
+  if (["pdf", "doc", "docx", "txt", "md"].includes(ext)) return "📄";
+  if (["xls", "xlsx", "csv"].includes(ext)) return "📊";
+  return "📄";
+}
+
+export function folderListPage(
+  req: Request,
+  opts: {
+    siteTitle: string;
+    token: string;
+    folderPath: string;
+    displayName: string;
+    currentPath: string;
+    folders: { name: string; sub: string }[];
+    files: { name: string; size: number; mime: string; sub: string }[];
+    expiresAt: number | null;
+    maxDownloads: number | null;
+    downloadCount: number;
+  }
+): Response {
+  const lang = pickLang(req);
+  const site = esc(opts.siteTitle);
+  const zh = lang === "zh";
+  const base = `/d/${encodeURIComponent(opts.token)}`;
+  const listUrl = (sub: string) => `${base}?p=${encodeURIComponent(sub)}`;
+  const dlUrl = (sub: string) => `${base}/download?p=${encodeURIComponent(sub)}`;
+
+  // 面包屑：直链根目录 → 当前子路径
+  const rel = opts.folderPath === "/"
+    ? opts.currentPath.split("/").filter(Boolean)
+    : opts.currentPath.startsWith(opts.folderPath + "/")
+      ? opts.currentPath.slice(opts.folderPath.length + 1).split("/").filter(Boolean)
+      : [];
+  const crumbs: { label: string; sub: string }[] = [{ label: opts.displayName, sub: "" }];
+  let acc = "";
+  for (const seg of rel) {
+    acc += "/" + seg;
+    crumbs.push({ label: seg, sub: acc });
+  }
+  const bcHtml = crumbs.map((c, i) => {
+    const last = i === crumbs.length - 1;
+    const label = esc(c.label);
+    return last
+      ? `<span class="bc-cur">${label}</span>`
+      : `<a class="bc" href="${esc(listUrl(c.sub))}">${label}</a>`;
+  }).join(`<span class="bc-sep">/</span>`);
+
+  const folderRows = opts.folders.map((f) => `
+    <tr>
+      <td><span class="fic">📁</span><a class="fname" href="${esc(listUrl(f.sub))}">${esc(f.name)}</a></td>
+      <td class="meta">${zh ? "文件夹" : "Folder"}</td>
+      <td class="meta"></td>
+      <td class="act"><a class="btn-ghost" href="${esc(listUrl(f.sub))}">${zh ? "打开" : "Open"}</a></td>
+    </tr>`).join("");
+
+  const fileRows = opts.files.map((f) => `
+    <tr>
+      <td><span class="fic">${fileEmoji(f.name)}</span><span class="fname">${esc(f.name)}</span></td>
+      <td class="meta">${esc(f.mime || "application/octet-stream")}</td>
+      <td class="meta">${fmtBytes(f.size)}</td>
+      <td class="act"><a class="btn-dl" href="${esc(dlUrl(f.sub))}" download>${zh ? "下载" : "Download"}</a></td>
+    </tr>`).join("");
+
+  const empty = opts.folders.length === 0 && opts.files.length === 0;
+  const remain = opts.maxDownloads ? Math.max(0, opts.maxDownloads - opts.downloadCount) : null;
+
+  const html = `<!DOCTYPE html>
+<html lang="${zh ? "zh-CN" : "en"}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>${esc(opts.displayName)} · ${site}</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  min-height: 100vh; padding: 32px 16px 60px; color: #fff; position: relative; overflow-x: hidden;
+  background: linear-gradient(160deg, #0b1026 0%, #1a1240 45%, #2a1045 100%);
+}
+.orb { position: fixed; border-radius: 50%; filter: blur(90px); opacity: .5; pointer-events: none; animation: drift 18s ease-in-out infinite alternate; }
+.o1 { width: 46vmax; height: 46vmax; background: #38bdf8; top: -18%; left: -14%; }
+.o2 { width: 40vmax; height: 40vmax; background: #8b5cf6; bottom: -20%; right: -10%; animation-delay: -6s; }
+@keyframes drift { from { transform: translate(0, 0) scale(1); } to { transform: translate(6vw, -5vh) scale(1.12); } }
+.wrap { position: relative; max-width: 760px; margin: 0 auto; animation: rise .6s cubic-bezier(.22,1.2,.36,1) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(24px) scale(.98); } to { opacity: 1; transform: none; } }
+.card {
+  border-radius: 32px; padding: 30px 26px 26px;
+  background: linear-gradient(145deg, rgba(255,255,255,.16), rgba(255,255,255,.05));
+  backdrop-filter: blur(32px) saturate(180%); -webkit-backdrop-filter: blur(32px) saturate(180%);
+  border: 1px solid rgba(255,255,255,.28);
+  box-shadow: 0 24px 60px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.35);
+}
+h1 { font-size: 22px; font-weight: 700; letter-spacing: -.02em; display: flex; align-items: center; gap: 10px; }
+h1 .fic { font-size: 26px; }
+.bcbar { margin-top: 12px; font-size: 13px; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; color: rgba(255,255,255,.45); }
+.bc { color: #7cc4ff; text-decoration: none; } .bc:hover { text-decoration: underline; }
+.bc-cur { color: rgba(255,255,255,.85); } .bc-sep { margin: 0 8px; opacity: .4; }
+.meta-line { margin-top: 8px; font-size: 12px; color: rgba(255,255,255,.45); }
+table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+td { padding: 13px 8px; border-top: 1px solid rgba(255,255,255,.12); vertical-align: middle; font-size: 15px; }
+tr:first-child td { border-top: none; }
+.fic { display: inline-block; width: 28px; text-align: center; margin-right: 8px; }
+.fname { color: #fff; text-decoration: none; word-break: break-all; }
+a.fname:hover { text-decoration: underline; }
+.meta { font-size: 12px; color: rgba(255,255,255,.5); white-space: nowrap; }
+.act { text-align: right; white-space: nowrap; }
+.btn-dl {
+  display: inline-block; padding: 9px 22px; border-radius: 16px; text-decoration: none;
+  background: linear-gradient(180deg, #3d9bff, #0a7cff); color: #fff; font-weight: 600; font-size: 14px;
+  box-shadow: 0 10px 24px rgba(10,124,255,.4); transition: transform .15s;
+}
+.btn-dl:hover { transform: translateY(-2px); }
+.btn-ghost {
+  display: inline-block; padding: 8px 18px; border-radius: 16px; text-decoration: none;
+  background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.25); color: #fff; font-size: 13px;
+}
+.btn-ghost:hover { background: rgba(255,255,255,.2); }
+.empty { text-align: center; padding: 44px 0 30px; color: rgba(255,255,255,.6); font-size: 14px; }
+.empty .icon { font-size: 44px; margin-bottom: 12px; }
+.foot { margin-top: 22px; text-align: center; font-size: 13px; color: rgba(255,255,255,.4); letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<div class="orb o1"></div><div class="orb o2"></div>
+<div class="wrap"><div class="card">
+  <h1><span class="fic">📁</span>${esc(opts.displayName)}</h1>
+  <div class="bcbar">${bcHtml}</div>
+  <div class="meta-line">${
+    zh
+      ? `${opts.files.length} 个文件 · ${opts.folders.length} 个子文件夹` +
+        (remain !== null ? ` · 剩余下载 ${remain} 次` : "") +
+        (opts.expiresAt ? ` · ${new Date(opts.expiresAt).toLocaleDateString(zh ? "zh-CN" : "en-US")} 过期` : "")
+      : `${opts.files.length} file(s) · ${opts.folders.length} folder(s)` +
+        (remain !== null ? ` · ${remain} downloads left` : "") +
+        (opts.expiresAt ? ` · expires ${new Date(opts.expiresAt).toLocaleDateString("en-US")}` : "")
+  }</div>
+  ${empty
+    ? `<div class="empty"><div class="icon">🗂️</div>${zh ? "该文件夹为空" : "This folder is empty"}</div>`
+    : `<table>${folderRows}${fileRows}</table>`}
+</div>
+<div class="foot">Powered by ${site}</div>
+</div>
+</body>
+</html>`;
+  const headers = new Headers({ "content-type": "text/html;charset=utf-8", "cache-control": "no-store" });
+  addSecurityHeaders(headers);
+  return new Response(html, { status: 200, headers });
+}
