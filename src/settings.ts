@@ -29,6 +29,12 @@ export interface Settings {
   trafficUsedBytes: number;
   /** 当前统计月份 YYYY-MM */
   trafficMonth: string;
+  /** 本月 R2 Class A 操作已用次数（写入 / 列表，删除不计费不统计） */
+  r2ClassAUsed: number;
+  /** 本月 R2 Class B 操作已用次数（读取 / Head） */
+  r2ClassBUsed: number;
+  /** R2 操作计数的当前统计月份 YYYY-MM */
+  r2OpsMonth: string;
   /** 单 IP 对同一分享的最大下载次数，0 = 不限 */
   maxDownloadsPerIp: number;
   /** 重复下载统计窗口（小时），0 = 永久 */
@@ -136,6 +142,9 @@ export const DEFAULT_SETTINGS: Settings = {
   trafficLimitBytes: 10 * 1024 ** 3, // 10 GB
   trafficUsedBytes: 0,
   trafficMonth: "",
+  r2ClassAUsed: 0,
+  r2ClassBUsed: 0,
+  r2OpsMonth: "",
   maxDownloadsPerIp: 2,
   countWindowHours: 24,
   autoBan: true,
@@ -185,6 +194,13 @@ function toInt(v: unknown, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+/* ═══════════ R2 免费额度（每月，Cloudflare 官方定价） ═══════════
+ * Standard 存储免费层：Class A（写/列表）100 万次/月、Class B（读取）1000 万次/月。
+ * 仅用于看板展示与判断是否接近免费上限，不做硬性拦截。
+ */
+export const R2_FREE_CLASS_A = 1_000_000;
+export const R2_FREE_CLASS_B = 10_000_000;
+
 export async function getSettings(env: Env): Promise<Settings> {
   // ① 命中内存缓存 —— 5 秒内直接返回，零 D1 开销
   const now = Date.now();
@@ -210,11 +226,25 @@ export async function getSettings(env: Env): Promise<Settings> {
     trafficMonth = currentMonth;
   }
 
+  // R2 操作计数 —— 与流量相同的跨月自动兜底（仅修正内存返回值，DB 由 addR2Ops 原子自愈）
+  const storedOpsMonth = map.get("r2_ops_month") ?? "";
+  let r2ClassAUsed = toInt(map.get("r2_class_a_used"), 0);
+  let r2ClassBUsed = toInt(map.get("r2_class_b_used"), 0);
+  let r2OpsMonth = storedOpsMonth;
+  if (storedOpsMonth && storedOpsMonth !== currentMonth && (r2ClassAUsed > 0 || r2ClassBUsed > 0)) {
+    r2ClassAUsed = 0;
+    r2ClassBUsed = 0;
+    r2OpsMonth = currentMonth;
+  }
+
   const result: Settings = {
     siteTitle: map.get("site_title") ?? DEFAULT_SETTINGS.siteTitle,
     trafficLimitBytes: toInt(map.get("traffic_limit_bytes"), DEFAULT_SETTINGS.trafficLimitBytes),
     trafficUsedBytes,
     trafficMonth,
+    r2ClassAUsed,
+    r2ClassBUsed,
+    r2OpsMonth,
     maxDownloadsPerIp: toInt(map.get("max_downloads_per_ip"), DEFAULT_SETTINGS.maxDownloadsPerIp),
     countWindowHours: toInt(map.get("count_window_hours"), DEFAULT_SETTINGS.countWindowHours),
     autoBan: (map.get("auto_ban") ?? "1") === "1",
@@ -301,16 +331,17 @@ export async function addTraffic(env: Env, bytes: number): Promise<void> {
   const day = now.toISOString().slice(0, 10);
 
   await env.db.batch([
-    // ① 同步 traffic_month 到当月（幂等：同月时 value 不变）
-    env.db.prepare(
-      "INSERT INTO settings(key, value) VALUES('traffic_month', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-    ).bind(month),
-
-    // ② 更新 traffic_used_bytes —— 跨月逻辑完全内联在 SQL 里
-    //    同月：累加旧值；跨月：从 0 开始加
+    // ① 更新 traffic_used_bytes —— 跨月逻辑完全内联在 SQL 里
+    //    此刻 traffic_month 仍是"旧月份"：
+    //    同月 → 累加旧值；跨月 → 从 0 开始加（实现真正的月度重置）
+    //    ⚠️ Bug 修复：原语句 CAST(CASE...END AS INTEGER) + ?2 AS TEXT)
+    //    少了一层 CAST 括号，在真实 SQLite/D1 上直接报 near "AS": syntax
+    //    error，导致线上流量统计（含 traffic_stats 每日汇总）从未写入成功。
+    //    此处 download 流程把 addTraffic 放在 ctx.waitUntil 里静默吞错，
+    //    下载本身不受影响，但标题栏"0 B / 10.0 GB"正是该 bug 的表现。
     env.db.prepare(
       `UPDATE settings SET value = CAST(
-        CASE
+        CAST(CASE
           WHEN (SELECT value FROM settings WHERE key = 'traffic_month') = ?1
           THEN COALESCE((SELECT value FROM settings WHERE key = 'traffic_used_bytes'), '0')
           ELSE '0'
@@ -318,9 +349,51 @@ export async function addTraffic(env: Env, bytes: number): Promise<void> {
        WHERE key = 'traffic_used_bytes'`
     ).bind(month, String(bytes)),
 
+    // ② 同步 traffic_month 到当月（必须在 ① 之后执行，否则 ① 的 CASE
+    //    读到的永远是当月，跨月清零分支永远不会命中）
+    env.db.prepare(
+      "INSERT INTO settings(key, value) VALUES('traffic_month', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).bind(month),
+
     // ③ traffic_stats 每日汇总（原本就是原子累加，保持不变）
     env.db.prepare(
       "INSERT INTO traffic_stats(day, bytes, downloads) VALUES(?1, ?2, 1) ON CONFLICT(day) DO UPDATE SET bytes = bytes + excluded.bytes, downloads = downloads + excluded.downloads"
     ).bind(day, bytes),
+  ]);
+}
+
+/**
+ * 累加本月 R2 操作计数（Class A / Class B），跨月自动重置。
+ *
+ * 与 addTraffic 同构的原子方案，且修正了语句顺序：
+ *   ① 先更新两个计数器 —— CASE 内联读取 r2_ops_month（此时仍是旧月份）：
+ *       同月累加、跨月从本次增量起算；行不存在时 INSERT 分支直接写入增量
+ *   ② 再把 r2_ops_month 同步到当月
+ * 两条语句同处一个 batch 事务，并发安全，无 read-compute-write 竞态。
+ */
+export async function addR2Ops(env: Env, classA: number, classB: number): Promise<void> {
+  const a = Math.max(0, Math.round(classA));
+  const b = Math.max(0, Math.round(classB));
+  if (a === 0 && b === 0) return;
+  const month = new Date().toISOString().slice(0, 7);
+
+  // key 为硬编码字面量（r2_class_a_used / r2_class_b_used），仅 SQL 内插值使用
+  const counterUpsert = (key: string, n: number) =>
+    env.db.prepare(
+      `INSERT INTO settings(key, value) VALUES(?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET value = CAST(
+         CAST(CASE
+           WHEN (SELECT value FROM settings WHERE key = 'r2_ops_month') = ?3
+           THEN COALESCE((SELECT value FROM settings WHERE key = '${key}'), '0')
+           ELSE '0'
+         END AS INTEGER) + ?2 AS TEXT)`
+    ).bind(key, String(n), month);
+
+  await env.db.batch([
+    counterUpsert("r2_class_a_used", a), // ① Class A 计数（读旧月份判定跨月）
+    counterUpsert("r2_class_b_used", b), // ① Class B 计数
+    env.db.prepare(
+      "INSERT INTO settings(key, value) VALUES('r2_ops_month', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).bind(month), // ② 最后同步统计月份
   ]);
 }

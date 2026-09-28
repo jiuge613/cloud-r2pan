@@ -478,6 +478,7 @@ export async function createStorageProvider(
   settings: { storageProvider: string | null; s3Endpoint: string | null; s3Region: string | null; s3Bucket: string | null; s3AccessKeyId: string | null; s3SecretKeyCipher: string | null; s3AddressingStyle: string | null }
 ): Promise<StorageProvider> {
   const useS3 = settings.storageProvider === "s3" && settings.s3Endpoint && settings.s3Bucket;
+  let provider: StorageProvider;
   if (useS3) {
     const secretAccessKey = settings.s3SecretKeyCipher
       ? await decryptSecret(settings.s3SecretKeyCipher, env.admin)
@@ -485,17 +486,23 @@ export async function createStorageProvider(
     if (!secretAccessKey || !settings.s3AccessKeyId) {
       // S3 配置不完整，回退到 R2
       if (!env.r2) throw new Error("Storage: S3 config incomplete and no R2 binding available");
-      return createR2Provider(env.r2);
+      provider = createR2Provider(env.r2);
+    } else {
+      provider = createS3Provider({
+        endpoint: settings.s3Endpoint!,
+        region: settings.s3Region || "us-east-1",
+        bucket: settings.s3Bucket!,
+        accessKeyId: settings.s3AccessKeyId,
+        secretAccessKey,
+        addressingStyle: (settings.s3AddressingStyle as "path" | "virtual") || "path",
+      });
     }
-    return createS3Provider({
-      endpoint: settings.s3Endpoint!,
-      region: settings.s3Region || "us-east-1",
-      bucket: settings.s3Bucket!,
-      accessKeyId: settings.s3AccessKeyId,
-      secretAccessKey,
-      addressingStyle: (settings.s3AddressingStyle as "path" | "virtual") || "path",
-    });
+  } else {
+    if (!env.r2) throw new Error("Storage: no R2 binding and S3 not configured");
+    provider = createR2Provider(env.r2);
   }
-  if (!env.r2) throw new Error("Storage: no R2 binding and S3 not configured");
-  return createR2Provider(env.r2);
+  // 统一挂操作计数装饰器（Class A/B 用量统计，见 opstats.ts），
+  // 管理后台 / 公开分享下载 / WebDAV 等所有经过本工厂的读写全部覆盖。
+  const { countedProvider } = await import("./opstats");
+  return countedProvider(env, provider);
 }
