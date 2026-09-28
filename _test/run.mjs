@@ -472,11 +472,32 @@ console.log("\n[10] billing —— 官方账单接口：字段映射 / 单位换
   eq(bl.toCount(71.4, "Requests"), 71, "Requests → 整数计数");
   eq(bl.toCount(3, "GB-month"), null, "存储类单位不能被当成操作次数");
 
+  // ③b 真实账号响应（ServiceName 带免费额度标注）—— 回归护栏
+  // 操作类行名自身含 "Storage"（"R2 Storage Class A Operations"），
+  // 早期实现会让「总存储」先命中 Class A 行（单位 Requests → 换算不出字节 → 降级/显示"—"）。
+  const realRows = bl.parseBillableUsage({
+    result: [
+      { ServiceName: "R2 Storage Class A Operations (First 1M included)", ServiceFamilyName: "R2 Storage", PricingQuantity: 29, PricingUnit: "Requests", ConsumedQuantity: 29, ConsumedUnit: "Requests", ContractedCost: 0, CumulatedPricingQuantity: 29, CumulatedContractedCost: 0, BillingCurrency: "USD", BillingPeriodStart: "2026-09-01T00:00:00Z", ChargePeriodStart: "2026-09-28T00:00:00Z", ChargePeriodEnd: "2026-09-29T00:00:00Z" },
+      { ServiceName: "R2 Storage Class B Operations (First 10M included)", ServiceFamilyName: "R2 Storage", PricingQuantity: 242, PricingUnit: "Requests", ConsumedQuantity: 242, ConsumedUnit: "Requests", ContractedCost: 0, CumulatedPricingQuantity: 242, CumulatedContractedCost: 0, BillingCurrency: "USD", ChargePeriodStart: "2026-09-28T00:00:00Z", ChargePeriodEnd: "2026-09-29T00:00:00Z" },
+      { ServiceName: "R2 Data Storage (First 10GB-Month included)", ServiceFamilyName: "R2 Storage", PricingQuantity: 0.0061, PricingUnit: "GB-Month", ConsumedQuantity: 0.0061, ConsumedUnit: "GB-Month", ContractedCost: 0, CumulatedPricingQuantity: 0.0061, CumulatedContractedCost: 0, BillingCurrency: "USD", ChargePeriodStart: "2026-09-28T00:00:00Z", ChargePeriodEnd: "2026-09-29T00:00:00Z" },
+    ],
+  });
+  const rm = bl.mapBillableRows(realRows);
+  eq(rm.storage.service, "R2 Data Storage (First 10GB-Month included)", "真实行名：存储命中 Data Storage（不被 Class A 行抢走）");
+  eq(rm.classA.service, "R2 Storage Class A Operations (First 1M included)", "真实行名：Class A 命中");
+  eq(rm.classB.service, "R2 Storage Class B Operations (First 10M included)", "真实行名：Class B 命中");
   const base = {
     enabled: true, configured: true,
     cycleLabel: "September 23 - October 23",
     cycleStart: "2026-09-23T00:00:00Z", cycleEnd: "2026-10-23T00:00:00Z",
   };
+
+  // 真实行名下的视图构建：存储必须来自官方计费接口，而不是被挤到降级路径
+  const rv = bl.buildUsageView({ ...base, bill: rm, analytics: null });
+  eq(rv.storage.source, "billable-usage", "真实行名：存储取自官方计费接口（不再被动降级）");
+  eq(rv.storage.usedBytes, bl.toBytes(0.0061, "GB-Month"), "真实行名：GB-Month → 字节");
+  eq(rv.classA.used, 29, "真实行名：Class A = 29");
+  eq(rv.classB.used, 242, "真实行名：Class B = 242");
 
   // ④ 主源：官方计费接口
   const v = bl.buildUsageView({ ...base, bill: m, analytics: null });

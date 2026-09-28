@@ -118,18 +118,32 @@ const isR2 = (row: BillableRow) =>
 /**
  * ServiceName → 本项目关心的三个 R2 计费项。
  * 官方 ServiceName 文案会迭代，因此用"关键词匹配 + R2 家族校验"而不是写死等号。
+ *
+ * 真实响应里的行名（Cloudflare 会把免费额度标注进 ServiceName）：
+ *   "R2 Storage Class A Operations (First 1M included)"
+ *   "R2 Storage Class B Operations (First 10M included)"
+ *   "R2 Data Storage (First 10GB-Month included)"
+ * 注意：操作类行名里同样含 "Storage"，直接按 /storage/ 匹配会先命中 Class A 行，
+ * 使存储取到 Requests 单位的行而换算不出字节 —— 因此存储匹配要排除操作类行。
  */
 export function mapBillableRows(rows: BillableRow[]) {
   const latest = latestPerService(rows);
-  const find = (patterns: RegExp[]): BillableRow | null => {
+  const find = (patterns: RegExp[], reject?: RegExp[]): BillableRow | null => {
     for (const p of patterns) {
-      const hit = latest.find((r) => p.test(r.service) && isR2(r));
+      const hit = latest.find(
+        (r) =>
+          p.test(r.service) &&
+          isR2(r) &&
+          !(reject ?? []).some((bad) => bad.test(r.service))
+      );
       if (hit) return hit;
     }
     return null;
   };
 
-  const storage = find([/\bstorage\b/i, /capacity/i]);
+  // 操作类特征：带 "Class A/B" 或 "Operations"
+  const OPS_RE = [/class\s*[-_ ]?\s*[ab]\b/i, /operations?\b/i];
+  const storage = find([/data\s*storage/i, /\bstorage\b/i, /capacity/i], OPS_RE);
   const classA = find([/class\s*[-_ ]?\s*a\b/i]);
   const classB = find([/class\s*[-_ ]?\s*b\b/i]);
 
