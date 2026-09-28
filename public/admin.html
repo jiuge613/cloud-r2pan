@@ -1835,21 +1835,27 @@ function switchTab(tab){
   (TAB_LOADERS[tab] || (() => Promise.resolve()))().catch(e => {
     v.innerHTML = `<div class="glass section"><div class="empty"><div class="icon">⚠️</div>${esc(e.message === 'unauthorized' ? t('loadingErr') : e.message)}</div></div>`;
   });
+  // 顶栏三个用量胶囊不属于任何单个视图：切换 Tab 时一并刷新，
+  // 覆盖"在文件管理页上传/删除后不回到概览、胶囊一直停在旧值"的场景。
+  if (tab !== 'overview') void refreshTopbarStats();
 }
 
-/* ═══════════ 概览 ═══════════ */
-async function loadOverview(){
-  const s = await api('/api/admin/stats');
+/* ═══════════ 顶栏用量胶囊（流量 / Class A / Class B） ═══════════
+ * 这些胶囊显示在标题栏，不属于任何单个视图，因此抽成独立函数：
+ *   - updateTopbarStats(s)：用已有的 stats 响应更新（概览页复用，零额外请求）
+ *   - refreshTopbarStats()：单独拉一次 /api/admin/stats（其它视图/操作后调用）
+ * 任何一处失败都静默，不影响主流程。 */
+function updateTopbarStats(s){
   const pill = $('#traffic-pill');
-  if(pill){
+  if(pill && s.traffic){
     pill.classList.toggle('danger', s.traffic.quota_exceeded);
     $('#pill-bar').style.width = (s.traffic.limit > 0 ? Math.min(100, s.traffic.percent) : 0) + '%';
     $('#pill-text').textContent = s.traffic.limit > 0
       ? `${fmtSize(s.traffic.used)} / ${fmtSize(s.traffic.limit)}`
       : `${fmtSize(s.traffic.used)} / ${t('unlimitedShort')}`;
   }
-  // Class A / Class B 操作用量胶囊（与流量胶囊同款展示：进度条 + 已用/额度）
-  // S3 后端时 ops.enabled=false → 隐藏（计数无 R2 计费含义）
+  // Class A / Class B 操作用量胶囊
+  // enabled=false：存储后端为 S3 兼容存储时计数无 R2 计费含义，隐藏
   const setOpsPill = (pillId, barId, textId, ops, label, tipKey) => {
     const p = $(pillId);
     if (!p) return;
@@ -1862,6 +1868,16 @@ async function loadOverview(){
   };
   setOpsPill('#ops-a-pill', '#ops-a-bar', '#ops-a-text', s.ops?.classA, t('opsALabel'), 'opsATip');
   setOpsPill('#ops-b-pill', '#ops-b-bar', '#ops-b-text', s.ops?.classB, t('opsBLabel'), 'opsBTip');
+}
+
+async function refreshTopbarStats(){
+  try { updateTopbarStats(await api('/api/admin/stats')); } catch {}
+}
+
+/* ═══════════ 概览 ═══════════ */
+async function loadOverview(){
+  const s = await api('/api/admin/stats');
+  updateTopbarStats(s);
   const maxDl = Math.max(1, ...s.chart.map(c => c.downloads));
   const c = s.counts;
   const tip = n => LANG === 'zh' ? `${n} ${t('times')} · ${fmtSize(0)}` : `${n} · ${fmtSize(0)}`;
@@ -2092,6 +2108,7 @@ function openEditorModal(fileId, fileName){
       updateStats();
       toast(t('fileSaved') + ' · ' + t('savedSize', { s: fmtSize(r.size) }));
       loadFiles();
+      void refreshTopbarStats(); // 在线保存走 st.put → Class A +1，顶栏同步刷新
     }catch(e){
       saveBtn.disabled = false;
       toast(e.message, 'err');
@@ -2184,7 +2201,7 @@ function uploadFiles(files){
       item.querySelector('.pct').textContent = pct + '%';
     };
     xhr.onload = () => {
-      if(xhr.status === 201){ item.querySelector('.pct').textContent = t('uploadDone'); toast(t('uploadOk', {name: file.name})); loadFiles(); }
+      if(xhr.status === 201){ item.querySelector('.pct').textContent = t('uploadDone'); toast(t('uploadOk', {name: file.name})); loadFiles(); void refreshTopbarStats(); }
       else { item.querySelector('.pct').textContent = t('uploadFailShort'); toast(t('uploadFail', {name: file.name}), 'err'); }
     };
     xhr.onerror = () => { item.querySelector('.pct').textContent = t('uploadFailShort'); toast(t('uploadFail', {name: file.name}), 'err'); };

@@ -414,13 +414,13 @@ console.log("\n[9] addR2Ops —— 月度计数累加 / 跨月重置 / 首次写
   eq(s3.r2OpsMonth, CUR_MONTH, "跨月兜底后 r2OpsMonth 返回当月（与 trafficMonth 行为一致）");
 }
 
-console.log("\n[10] countedProvider —— Class A/B 分类计数与批量落库");
+console.log("\n[10] countedProvider —— Class A/B 分类计数、实时落库与节流");
 {
   const { env } = freshEnv();
   const calls = [];
   const fake = {
     kind: "r2",
-    async put(k) { calls.push(["put", k]); return { size: 1 }; },
+    async put(k, b, o) { calls.push(["put", k]); if (o && o.throwIt) throw new Error("boom"); return { size: 1 }; },
     async get(k) { calls.push(["get", k]); return null; },
     async head(k) { calls.push(["head", k]); return null; },
     async list(o) { calls.push(["list", o?.prefix ?? ""]); return { entries: [], truncated: false }; },
@@ -428,24 +428,47 @@ console.log("\n[10] countedProvider —— Class A/B 分类计数与批量落库
   };
   const p = ops.countedProvider(env, fake);
 
-  await p.put("a.txt", new Uint8Array([1]), {});
-  await p.get("a.txt");
-  await p.head("a.txt");
-  await p.list({ prefix: "d/" });
-  await p.delete("a.txt"); // 删除免费，不计数
+  // ── 干净起点：清空遗留 pending，并跨过节流窗口（MIN_FLUSH_INTERVAL_MS = 1500） ──
+  await ops.flushR2Ops(env);
+  await new Promise((r) => setTimeout(r, 1600));
 
-  // 未到阈值（4 条）→ 尚未落库，但已计入 pending
-  eq(await getVal(env, "r2_class_a_used"), null, "未达阈值不落库");
-  await ops.flushR2Ops(env); // 手动强制落库
+  // ① 核心回归：**单次**上传就必须落库。
+  //    旧策略（内存攒够 10 次 + 15s 定时器）下此断言必失败——那正是
+  //    线上"上传了文件但标题栏写入量一直是 0"的根因（跨 isolate 攒不够、
+  //    定时器在 Workers 里不保证触发）。
+  await p.put("a.txt", new Uint8Array([1]), {});
+  eq(await getVal(env, "r2_class_a_used"), "1", "单次 put 立即落库（Class A +1，看板可实时感知）");
+
+  // ② 节流窗口内的连续读取 → 合并写盘，不逐次打 D1（成本保护仍在）
+  for (let i = 0; i < 4; i++) await p.get("a.txt");
+  // ① 已写入过一次 → b 计数行存在且为 "0"（addR2Ops 同时 upsert 两个计数列）
+  const bBefore = await getVal(env, "r2_class_b_used");
+  eq(bBefore, "0", "节流窗口内的读取合并累积，未逐次写库");
+  await ops.flushR2Ops(env); // 手动取出 pending
+  eq(await getVal(env, "r2_class_b_used"), "4", "Class B = 4 次 get（合并计数不丢失）");
+
+  // ③ head / list / delete 的分类正确性
+  await p.head("a.txt");            // Class B
+  await p.list({ prefix: "d/" });   // Class A
+  await p.delete("a.txt");          // 删除免费，不计数
+  await ops.flushR2Ops(env);
   eq(await getVal(env, "r2_class_a_used"), "2", "Class A = put + list = 2 次");
-  eq(await getVal(env, "r2_class_b_used"), "2", "Class B = get + head = 2 次");
-  eq(calls.length, 5, "全部 5 次调用都透传给底层 provider");
+  eq(await getVal(env, "r2_class_b_used"), "5", "Class B = get×4 + head = 5 次");
+  eq(calls.length, 8, "全部 8 次调用都透传给底层 provider");
   ok(calls.some(c => c[0] === "delete"), "delete 正常透传（免费不计入统计）");
 
-  // 阈值自动落库：再累计 10 次 → 无需手动 flush
-  for (let i = 0; i < 10; i++) await p.get("b.txt"); // B +10 → 触发阈值
-  eq(await getVal(env, "r2_class_a_used"), "2", "阈值触发后 Class A 保持 2（本轮只读）");
-  eq(await getVal(env, "r2_class_b_used"), "12", "Class B 自动落库 2+10=12（未手动 flush）");
+  // ④ 累计满阈值（FLUSH_THRESHOLD = 25）→ 无视节流窗口立即自动落库
+  await ops.flushR2Ops(env);
+  for (let i = 0; i < 25; i++) await p.get("b.txt");
+  // ⑤ 底层操作失败同样计入用量（R2 对失败的 Get/Put 也计操作次数），
+  //    且异常必须原样透传给调用方，不能被记账逻辑吞掉
+  await ops.flushR2Ops(env);
+  const aBefore = Number(await getVal(env, "r2_class_a_used"));
+  let threw = null;
+  try { await p.put("boom.txt", new Uint8Array([1]), { throwIt: true }); } catch (e) { threw = e; }
+  ok(threw instanceof Error, "底层 put 抛错时异常原样透传");
+  await ops.flushR2Ops(env);
+  eq(Number(await getVal(env, "r2_class_a_used")), aBefore + 1, "失败的 put 同样计入 Class A");
 
   // 覆盖性：createStorageProvider 工厂返回的 provider 已包计数装饰器
   const { createStorageProvider } = require("./build/storage.js");
