@@ -245,7 +245,13 @@ export function buildUsageView(input: {
     limit: number,
     fallbackUnit: string
   ): MetricView => {
-    const q = row ? toCount(row.cumulatedQuantity || row.quantity, row.unit) : null;
+    // 免费额度内的行：PricingQuantity/CumulatedPricingQuantity 是"扣除免费额度后的计费量"，
+    // 在额度内恒为 0；真实消耗在 ConsumedQuantity 里。我们的目的是"离免费额度还有多远"，
+    // 因此取三个官方数值中的最大者（消耗量 ≥ 计费量恒成立）。
+    const qRaw = row
+      ? Math.max(row.cumulatedQuantity || 0, row.quantity || 0, row.consumedQuantity || 0)
+      : 0;
+    const q = row ? toCount(qRaw, row.unit) : null;
     const used = q !== null ? q : analyticsValue;
     if (used === null || used === undefined) return unavailableMetric(limit);
     const unit = row?.unit || fallbackUnit;
@@ -270,7 +276,11 @@ export function buildUsageView(input: {
     displayUnit: "bytes",
   };
   const bRow = bill?.storage ?? null;
-  const bBytes = bRow ? toBytes(bRow.cumulatedQuantity || bRow.quantity, bRow.unit) : null;
+  // 同 buildMetric：计费量在免费额度内可能为 0，真实存储量在 ConsumedQuantity 里，取最大者
+  const bQty = bRow
+    ? Math.max(bRow.cumulatedQuantity || 0, bRow.quantity || 0, bRow.consumedQuantity || 0)
+    : 0;
+  const bBytes = bRow ? toBytes(bQty, bRow.unit) : null;
   if (bBytes !== null && bRow) {
     storage = {
       available: true,
@@ -446,7 +456,13 @@ export interface DiagReport {
   /** ① 用户令牌有效性（account-owned 令牌不支持此端点，会降级为 skipped） */
   token_verify: DiagCheck & { skipped: boolean };
   /** ② 账单接口 */
-  billable_usage: DiagCheck & { rowCount: number; r2Services: string[]; allServices: string[] };
+  billable_usage: DiagCheck & {
+    rowCount: number;
+    r2Services: string[];
+    allServices: string[];
+    /** R2 行的原始数值（排障用：免费额度内 PricingQuantity 可能为 0，真实量在 ConsumedQuantity） */
+    r2Details: { service: string; unit: string; cumulatedQuantity: number; quantity: number; consumedQuantity: number; cumulatedCost: number }[];
+  };
   /** ③ 用量接口（R2 面板同源） */
   graphql: DiagCheck & { classA: number | null; classB: number | null; storageBytes: number | null };
   cycle: { start: string; end: string; label: string };
@@ -514,7 +530,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
     account_id_format_ok: ACCOUNT_ID_RE.test(accountId),
     token_configured: !!settings.cfApiTokenCipher,
     token_verify: { ok: false, status: null, message: "", skipped: true },
-    billable_usage: { ok: false, status: null, message: "", rowCount: 0, r2Services: [], allServices: [] },
+    billable_usage: { ok: false, status: null, message: "", rowCount: 0, r2Services: [], allServices: [], r2Details: [] },
     graphql: { ok: false, status: null, message: "", classA: null, classB: null, storageBytes: null },
     cycle: {
       start: cycle.start.toISOString().slice(0, 10),
@@ -564,6 +580,14 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
         rowCount: rows.length,
         r2Services: [...new Set(r2Rows.map((x) => x.service).filter(Boolean))],
         allServices: all,
+        r2Details: r2Rows.map((x) => ({
+          service: x.service,
+          unit: x.unit,
+          cumulatedQuantity: x.cumulatedQuantity,
+          quantity: x.quantity,
+          consumedQuantity: x.consumedQuantity,
+          cumulatedCost: x.cumulatedCost,
+        })),
       };
     } else {
       report.billable_usage = {
@@ -573,6 +597,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
         rowCount: 0,
         r2Services: [],
         allServices: [],
+        r2Details: [],
       };
     }
   }

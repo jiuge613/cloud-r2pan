@@ -3928,6 +3928,10 @@ async function loadSettings(){
       else if (b.status === 403) lines.push(t('diagBill403'));
       else if (b.status === null) lines.push(t('diagNetwork', { msg: b.message }));
       else lines.push(t('diagBillFail', { msg: `HTTP ${b.status ?? '—'} · ${b.message}` }));
+      // R2 行原始数值（排障：免费额度内 PricingQuantity 可能为 0，真实量在 ConsumedQuantity）
+      for (const d of (b.r2Details || [])) {
+        lines.push(`  · ${d.service} : cum=${d.cumulatedQuantity} pricing=${d.quantity} consumed=${d.consumedQuantity} ${d.unit} · cost=${d.cumulatedCost}`);
+      }
       // ④ R2 用量接口
       const g = d.graphql;
       if (g.ok) {

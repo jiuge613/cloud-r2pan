@@ -499,6 +499,21 @@ console.log("\n[10] billing —— 官方账单接口：字段映射 / 单位换
   eq(rv.classA.used, 29, "真实行名：Class A = 29");
   eq(rv.classB.used, 242, "真实行名：Class B = 242");
 
+  // ③c 免费额度内的行：PricingQuantity / CumulatedPricingQuantity 是"扣免费额度后的计费量"= 0，
+  //     真实消耗在 ConsumedQuantity —— 视图必须取消耗量，否则顶栏显示 0（线上实测踩坑）
+  const freeRows = bl.parseBillableUsage({
+    result: [
+      { ServiceName: "R2 Storage Class A Operations (First 1M included)", ServiceFamilyName: "R2 Storage", PricingQuantity: 0, PricingUnit: "Requests", ConsumedQuantity: 12, ConsumedUnit: "Requests", ContractedCost: 0, CumulatedPricingQuantity: 0, CumulatedContractedCost: 0, BillingCurrency: "USD", ChargePeriodEnd: "2026-09-29T00:00:00Z" },
+      { ServiceName: "R2 Data Storage (First 10GB-Month included)", ServiceFamilyName: "R2 Storage", PricingQuantity: 0, PricingUnit: "GB-Month", ConsumedQuantity: 0.0061, ConsumedUnit: "GB-Month", ContractedCost: 0, CumulatedPricingQuantity: 0, CumulatedContractedCost: 0, BillingCurrency: "USD", ChargePeriodEnd: "2026-09-29T00:00:00Z" },
+    ],
+  });
+  const fm = bl.mapBillableRows(freeRows);
+  const fv = bl.buildUsageView({ ...base, bill: fm, analytics: null });
+  eq(fv.classA.used, 12, "免费额度内：计费量=0 → 取消耗量 12（而非显示 0）");
+  eq(fv.storage.source, "billable-usage", "免费额度内：存储仍来自官方计费接口");
+  eq(fv.storage.usedBytes, bl.toBytes(0.0061, "GB-Month"), "免费额度内：存储取消耗量换算字节");
+  eq(fv.cost.r2, 0, "免费额度内费用为 0 是真实官方值，保持透传");
+
   // ④ 主源：官方计费接口
   const v = bl.buildUsageView({ ...base, bill: m, analytics: null });
   eq(v.classA.source, "billable-usage", "Class A 优先取官方计费接口");
