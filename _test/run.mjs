@@ -514,6 +514,19 @@ console.log("\n[10] billing —— 官方账单接口：字段映射 / 单位换
   eq(fv.storage.usedBytes, bl.toBytes(0.0061, "GB-Month"), "免费额度内：存储取消耗量换算字节");
   eq(fv.cost.r2, 0, "免费额度内费用为 0 是真实官方值，保持透传");
 
+  // ③d 数据源优先级：官方面板同源的 Analytics 优先（窗口/口径与面板一致），
+  //     计费接口行仅在 Analytics 不可用时兜底；费用仍只来自计费接口
+  const vBoth = bl.buildUsageView({
+    ...base, bill: rm,
+    analytics: { classA: 119, classB: 253, storageBytes: 6909000, cycleLabel: "September 23 - October 23" },
+  });
+  eq(vBoth.classA.source, "analytics", "A 类优先取面板同源的 Analytics");
+  eq(vBoth.classA.used, 119, "A 类 = 面板数值 119");
+  eq(vBoth.classB.used, 253, "B 类 = 面板数值 253");
+  eq(vBoth.storage.source, "analytics", "存储优先取面板同源口径");
+  eq(vBoth.storage.usedBytes, 6909000, "存储 = 面板的总存储空间字节");
+  eq(vBoth.cost.available, true, "费用仍来自计费接口");
+
   // ④ 主源：官方计费接口
   const v = bl.buildUsageView({ ...base, bill: m, analytics: null });
   eq(v.classA.source, "billable-usage", "Class A 优先取官方计费接口");
@@ -653,7 +666,14 @@ console.log("\n[13] usage/diag —— 连接诊断：错误提取 / 未配置短
   eq(bl.extractErrors(null), [], "extractErrors：null 响应不抛错");
   eq(bl.extractErrors({}), [], "extractErrors：无 errors 字段 → 空数组");
 
-  // ② 未配置 Token：短路返回，不发起任何网络请求（fetch 被替换成炸弹验证）
+  // ④ 账单周期自校准：官方 BillingPeriodStart 才是权威周期（设置可能填错）
+  eq(bl.detectCycleDay("2026-09-23T00:00:00Z"), 23, "BillingPeriodStart 9/23 → 周期日 23");
+  eq(bl.detectCycleDay("2026-09-01T00:00:00Z"), 1, "周期日 1 合法");
+  eq(bl.detectCycleDay(null), null, "无 periodStart → null");
+  eq(bl.detectCycleDay("not-a-date"), null, "无法解析 → null");
+  eq(bl.detectCycleDay("2026-09-31T00:00:00Z"), null, "非法日期 → null");
+
+  // ⑤ 未配置 Token：短路返回，不发起任何网络请求（fetch 被替换成炸弹验证）
   const realFetch = globalThis.fetch;
   globalThis.fetch = () => { throw new Error("网络请求不应发生"); };
   try {

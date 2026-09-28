@@ -726,6 +726,7 @@ const I18N = {
     diagNoToken: '❌ 未配置 API Token（或 Token 解密失败）',
     diagAllOk: '全部通过。若顶栏仍显示「—」：失败结果有 60 秒缓存，等 1 分钟后刷新页面即可',
     diagCycle: '当前账单周期：{c}（{s} ~ {e}）',
+    diagCycleDetected: '⚠️ 官方账单周期实际从每月 {n} 号开始（与你填的起始日不同）。系统已自动按官方周期校准统计窗口，建议把上方「账单周期起始日」改为 {n}',
     diagNetwork: '❌ 网络请求失败：{msg}（Worker 出网被拦或超时）',
     statDownloads: '累计下载', todayN: '今日 {n} 次', statFiles: '文件总数', storedR2: '存储于 R2 对象存储',
     statShares: '分享链接', sharesFoot: '有效 {a} 个 · 封禁 IP {b} 个',
@@ -1127,6 +1128,7 @@ const I18N = {
     diagNoToken: '❌ API Token not configured (or decryption failed)',
     diagAllOk: 'All checks passed. If pills still show "—": failures are cached for 60s — refresh the page after a minute',
     diagCycle: 'Current billing cycle: {c} ({s} ~ {e})',
+    diagCycleDetected: '⚠️ The official billing cycle actually starts on day {n} of the month (differs from your setting). The stats window has been auto-calibrated; consider updating "Billing cycle start day" above to {n}',
     diagNetwork: '❌ Network request failed: {msg} (Worker egress blocked or timeout)',
     statDownloads: 'Total Downloads', todayN: '{n} today', statFiles: 'Files', storedR2: 'Stored in R2 object storage',
     statShares: 'Share Links', sharesFoot: '{a} active · {b} banned IPs',
@@ -3913,6 +3915,9 @@ async function loadSettings(){
     try {
       const d = await api('/api/admin/usage/diag');
       const lines = [t('diagCycle', { c: d.cycle.label, s: d.cycle.start, e: d.cycle.end })];
+      if (d.detected_cycle_day && d.detected_cycle_day !== Number($('#st-cf-cycle')?.value)) {
+        lines.push(t('diagCycleDetected', { n: d.detected_cycle_day }));
+      }
       // ① Token
       if (!d.token_configured) lines.push(t('diagNoToken'));
       else if (d.token_verify.skipped) lines.push(t('diagTokenSkipped'));

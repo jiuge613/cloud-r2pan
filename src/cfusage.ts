@@ -177,12 +177,19 @@ export function parseOfficialUsage(json: unknown, cycleLabel: string): OfficialU
 /**
  * 拉取官方用量数据。任何失败（未配置 token、网络错误、GraphQL errors、超时）
  * 都返回 null —— 调用方回退本地自记账，绝不影响看板可用性。
+ *
+ * cycleOverride：调用方（billing.ts）从官方 BillingPeriodStart 校准出真实账单周期后
+ * 传入，保证统计窗口与官方面板完全一致；不传则按设置的 cycleDay 计算。
  */
-export async function fetchOfficialUsage(env: Env, settings: Settings): Promise<OfficialUsage | null> {
+export async function fetchOfficialUsage(
+  env: Env,
+  settings: Settings,
+  cycleOverride?: BillingCycle
+): Promise<OfficialUsage | null> {
   const accountId = (settings.cfAccountId || "").trim();
   if (!accountId || !settings.cfApiTokenCipher) return null;
 
-  const cycle = billingCycleRange(settings.billingCycleDay);
+  const cycle = cycleOverride ?? billingCycleRange(settings.billingCycleDay);
   const cacheKey = `${accountId}|${cycle.start.toISOString()}`;
   if (_cache && _cacheKey === cacheKey && Date.now() - _cache.at < CACHE_TTL_MS) {
     return _cache.data;

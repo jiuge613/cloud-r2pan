@@ -172,9 +172,27 @@ export function toBytes(quantity: number, unit: string): number | null {
   return mult === null ? null : quantity * mult;
 }
 
+/**
+ * 从官方 BillingPeriodStart 校准账单周期起始日。
+ * 设置里的"周期起始日"可能填错（如默认 1，而真实周期从 23 号开始），
+ * 官方返回的 BillingPeriodStart 才是权威值。无法解析 / 超出 1-28 返回 null。
+ */
+export function detectCycleDay(periodStart: string | null | undefined): number | null {
+  if (!periodStart) return null;
+  const d = new Date(periodStart);
+  if (Number.isNaN(d.getTime())) return null;
+  // 防 JS Date 滚动：如 "2026-09-31" 会被解析成 10/1，各字段必须与原文一致
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(periodStart);
+  if (m) {
+    const y = Number(m[1]), mo = Number(m[2]), da = Number(m[3]);
+    if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== mo || d.getUTCDate() !== da) return null;
+  }
+  const day = d.getUTCDate();
+  return day >= 1 && day <= 28 ? day : null;
+}
+
 /** 单位换算：操作次数。单位非计数类（如 GB-month）时返回 null */
-export function toCount(quantity: number, unit: string): number | null {
-  const u = (unit || "").toLowerCase().trim();
+export function toCount(quantity: number, unit: string): number | null {  const u = (unit || "").toLowerCase().trim();
   if (u === "" || /request|count|operation|class|times/i.test(u)) return Math.round(quantity);
   if (/^-?month|gb|byte|second/i.test(u)) return null;
   // 未知单位保守按计数处理（requests 类指标的常见写法）
@@ -245,19 +263,20 @@ export function buildUsageView(input: {
     limit: number,
     fallbackUnit: string
   ): MetricView => {
-    // 免费额度内的行：PricingQuantity/CumulatedPricingQuantity 是"扣除免费额度后的计费量"，
-    // 在额度内恒为 0；真实消耗在 ConsumedQuantity 里。我们的目的是"离免费额度还有多远"，
-    // 因此取三个官方数值中的最大者（消耗量 ≥ 计费量恒成立）。
+    // 优先取 Analytics（官方面板"X类运营"同源、同一统计窗口，数字与面板一致）；
+    // 拿不到时降级用计费接口行。计费行的 PricingQuantity 是"扣免费额度后的计费量"，
+    // 额度内恒为 0，真实消耗在 ConsumedQuantity —— 取三个官方数值最大者兜底。
     const qRaw = row
       ? Math.max(row.cumulatedQuantity || 0, row.quantity || 0, row.consumedQuantity || 0)
       : 0;
     const q = row ? toCount(qRaw, row.unit) : null;
-    const used = q !== null ? q : analyticsValue;
+    const fromAnalytics = analyticsValue !== null && analyticsValue !== undefined;
+    const used = fromAnalytics ? analyticsValue : q;
     if (used === null || used === undefined) return unavailableMetric(limit);
-    const unit = row?.unit || fallbackUnit;
+    const unit = fromAnalytics ? fallbackUnit : (row?.unit || fallbackUnit);
     return {
       available: true,
-      source: row ? "billable-usage" : "analytics",
+      source: fromAnalytics ? "analytics" : "billable-usage",
       used,
       unit,
       limit,
@@ -269,7 +288,7 @@ export function buildUsageView(input: {
   const classA = buildMetric(bill?.classA ?? null, analytics?.classA ?? null, R2_LIMIT_CLASS_A, "requests");
   const classB = buildMetric(bill?.classB ?? null, analytics?.classB ?? null, R2_LIMIT_CLASS_B, "requests");
 
-  // ── 存储：字节 ──
+  // ── 存储：字节（同样 Analytics 面板同源优先，计费接口的 GB-Month 行兜底）──
   let storage: StorageView = {
     ...unavailableMetric(R2_LIMIT_STORAGE_BYTES),
     usedBytes: null,
@@ -281,19 +300,7 @@ export function buildUsageView(input: {
     ? Math.max(bRow.cumulatedQuantity || 0, bRow.quantity || 0, bRow.consumedQuantity || 0)
     : 0;
   const bBytes = bRow ? toBytes(bQty, bRow.unit) : null;
-  if (bBytes !== null && bRow) {
-    storage = {
-      available: true,
-      source: "billable-usage",
-      used: bBytes,
-      unit: bRow.unit,
-      limit: R2_LIMIT_STORAGE_BYTES,
-      percent: Math.min(100, Math.round((bBytes / R2_LIMIT_STORAGE_BYTES) * 100)),
-      exceeded: bBytes >= R2_LIMIT_STORAGE_BYTES,
-      usedBytes: bBytes,
-      displayUnit: bRow.unit,
-    };
-  } else if (analytics) {
+  if (analytics) {
     const used = Math.max(0, Math.round(analytics.storageBytes));
     storage = {
       available: true,
@@ -305,6 +312,18 @@ export function buildUsageView(input: {
       exceeded: used >= R2_LIMIT_STORAGE_BYTES,
       usedBytes: used,
       displayUnit: "bytes",
+    };
+  } else if (bBytes !== null && bRow) {
+    storage = {
+      available: true,
+      source: "billable-usage",
+      used: bBytes,
+      unit: bRow.unit,
+      limit: R2_LIMIT_STORAGE_BYTES,
+      percent: Math.min(100, Math.round((bBytes / R2_LIMIT_STORAGE_BYTES) * 100)),
+      exceeded: bBytes >= R2_LIMIT_STORAGE_BYTES,
+      usedBytes: bBytes,
+      displayUnit: bRow.unit,
     };
   }
 
@@ -408,14 +427,32 @@ export async function fetchUsageSnapshot(env: Env, settings: Settings): Promise<
   if (_inflight && _inflight.key === key) return _inflight.p; // 单飞：并发请求合并
 
   const p = (async (): Promise<UsageView> => {
-    // 两个官方源并行；任一失败都独立降级
-    const [rows, analytics] = await Promise.all([
-      fetchBillableRows(env, settings, cycle.start.toISOString().slice(0, 10), cycle.end.toISOString().slice(0, 10)),
-      fetchOfficialUsage(env, settings).catch(() => null),
-    ]);
+    // ① 先取计费接口：提供费用，并用官方 BillingPeriodStart 校准真实账单周期
+    //    （设置里的"周期起始日"可能填错，官方 BillingPeriodStart 才是权威值）
+    const rows = await fetchBillableRows(
+      env, settings,
+      cycle.start.toISOString().slice(0, 10),
+      cycle.end.toISOString().slice(0, 10)
+    );
+    const bill = rows && rows.length > 0 ? mapBillableRows(rows) : null;
+
+    let effCycle = cycle;
+    const detectedDay = detectCycleDay(bill?.periodStart ?? null);
+    if (detectedDay !== null && detectedDay !== Math.round(settings.billingCycleDay)) {
+      effCycle = billingCycleRange(detectedDay);
+    }
+
+    // ② 用量取 Analytics（官方面板"X类运营/总存储空间"同源、同窗口，数字与面板一致），
+    //    按校准后的周期查询；计费接口行仅在 Analytics 不可用时兜底。费用只来自计费接口。
+    const analytics = await fetchOfficialUsage(env, settings, effCycle).catch(() => null);
+
     const view = buildUsageView({
-      ...base,
-      bill: rows && rows.length > 0 ? mapBillableRows(rows) : null,
+      enabled,
+      configured,
+      cycleLabel: effCycle.label,
+      cycleStart: effCycle.start.toISOString(),
+      cycleEnd: effCycle.end.toISOString(),
+      bill,
       analytics,
     });
     if (view.classA.available || view.classB.available || view.storage.available || view.cost.available) {
@@ -466,6 +503,8 @@ export interface DiagReport {
   /** ③ 用量接口（R2 面板同源） */
   graphql: DiagCheck & { classA: number | null; classB: number | null; storageBytes: number | null };
   cycle: { start: string; end: string; label: string };
+  /** 从官方 BillingPeriodStart 校准出的真实周期起始日（与设置不一致说明设置填错了） */
+  detected_cycle_day: number | null;
   generated_at: string;
 }
 
@@ -537,6 +576,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
       end: cycle.end.toISOString().slice(0, 10),
       label: cycle.label,
     },
+    detected_cycle_day: null,
     generated_at: now,
   };
 
@@ -573,6 +613,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
       const rows = parseBillableUsage(r.json);
       const all = [...new Set(rows.map((x) => x.service).filter(Boolean))];
       const r2Rows = rows.filter(isR2);
+      report.detected_cycle_day = detectCycleDay(mapBillableRows(rows)?.periodStart ?? null);
       report.billable_usage = {
         ok: true,
         status: 200,
