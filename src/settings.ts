@@ -35,6 +35,12 @@ export interface Settings {
   r2ClassBUsed: number;
   /** R2 操作计数的当前统计月份 YYYY-MM */
   r2OpsMonth: string;
+  /** Cloudflare Account ID（Account Tag）—— 用于 GraphQL Analytics API 拉官方用量；空 = 不对接 */
+  cfAccountId: string;
+  /** Cloudflare API Token 密文（需 Account Analytics:Read 权限） */
+  cfApiTokenCipher: string | null;
+  /** 账单周期起始日（1-28，与官方面板"September 23 - October 23"一致），默认 1 = 自然月 */
+  billingCycleDay: number;
   /** 单 IP 对同一分享的最大下载次数，0 = 不限 */
   maxDownloadsPerIp: number;
   /** 重复下载统计窗口（小时），0 = 永久 */
@@ -187,6 +193,10 @@ export const DEFAULT_SETTINGS: Settings = {
   webdavRootPath: "/",
   // UI 主题 —— 默认白色 Apple 风格
   uiTheme: "light",
+  // Cloudflare 官方用量对接（默认不启用，回退本地自记账数据）
+  cfAccountId: "",
+  cfApiTokenCipher: null,
+  billingCycleDay: 1,
 };
 
 function toInt(v: unknown, fallback: number): number {
@@ -195,11 +205,12 @@ function toInt(v: unknown, fallback: number): number {
 }
 
 /* ═══════════ R2 免费额度（每月，Cloudflare 官方定价） ═══════════
- * Standard 存储免费层：Class A（写/列表）100 万次/月、Class B（读取）1000 万次/月。
- * 仅用于看板展示与判断是否接近免费上限，不做硬性拦截。
+ * Standard 存储免费层：Class A（写/列表）100 万次/月、Class B（读取）1000 万次/月、
+ * 存储量 10 GB-月。仅用于看板展示与判断是否接近免费上限，不做硬性拦截。
  */
 export const R2_FREE_CLASS_A = 1_000_000;
 export const R2_FREE_CLASS_B = 10_000_000;
+export const R2_FREE_STORAGE_BYTES = 10 * 1024 ** 3;
 
 export async function getSettings(env: Env): Promise<Settings> {
   // ① 命中内存缓存 —— 5 秒内直接返回，零 D1 开销
@@ -237,6 +248,9 @@ export async function getSettings(env: Env): Promise<Settings> {
     r2OpsMonth = currentMonth;
   }
 
+  // Cloudflare 官方用量对接（GraphQL Analytics API）
+  const cycleDayRaw = toInt(map.get("billing_cycle_day"), DEFAULT_SETTINGS.billingCycleDay);
+
   const result: Settings = {
     siteTitle: map.get("site_title") ?? DEFAULT_SETTINGS.siteTitle,
     trafficLimitBytes: toInt(map.get("traffic_limit_bytes"), DEFAULT_SETTINGS.trafficLimitBytes),
@@ -245,6 +259,9 @@ export async function getSettings(env: Env): Promise<Settings> {
     r2ClassAUsed,
     r2ClassBUsed,
     r2OpsMonth,
+    cfAccountId: map.get("cf_account_id") ?? "",
+    cfApiTokenCipher: map.get("cf_api_token_cipher") ?? null,
+    billingCycleDay: Math.min(28, Math.max(1, cycleDayRaw || 1)),
     maxDownloadsPerIp: toInt(map.get("max_downloads_per_ip"), DEFAULT_SETTINGS.maxDownloadsPerIp),
     countWindowHours: toInt(map.get("count_window_hours"), DEFAULT_SETTINGS.countWindowHours),
     autoBan: (map.get("auto_ban") ?? "1") === "1",

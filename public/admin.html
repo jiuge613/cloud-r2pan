@@ -320,7 +320,9 @@ body {
 .traffic-pill.danger .bar i { background: linear-gradient(90deg,#fbbf24,#ff453a); }
 .traffic-pill.danger { color: #ffb3ae; }
 /* Class A / B 操作用量胶囊 —— 紧凑展示，详情看悬浮提示 */
-.traffic-pill.op { cursor: default; gap: 7px; padding: 8px 12px; }
+.traffic-pill.op { cursor: default; gap: 7px; padding: 8px 12px; flex-shrink: 0; }
+/* 文本列不换行不截断：极端值（10 GB / 100万 / 1000万）靠 fmtOps/fmtSize 缩写控制长度 */
+.traffic-pill.op span:last-child { white-space: nowrap; }
 .traffic-pill.op .bar { width: 34px; }
 
 /* ── 侧边栏导航 ────────────────────────── */
@@ -683,10 +685,20 @@ const I18N = {
     navContent: '文件管理', navAnalytics: '运营分析', navSecurity: '安全中心', navSystem: '系统设置',
     // 概览
     statTraffic: '本月流量', usedPercent: '已用 {n}% · 跨月自动重置', noLimit: '未设置限额',
-    opsALabel: '写入', opsBLabel: '读取',
-    opsATip: '本月 Class A 操作（写入 / 列表）· 免费额度 100 万次/月，跨月自动重置',
-    opsBTip: '本月 Class B 操作（读取）· 免费额度 1000 万次/月，跨月自动重置',
+    opsALabel: 'A 类', opsBLabel: 'B 类', storageLabel: '存储',
+    opsATip: 'Class A 操作（写入 / 列表）· 免费额度 100 万次/月',
+    opsBTip: 'Class B 操作（读取 / Head）· 免费额度 1000 万次/月',
+    storageTip: '总存储（含元数据）· 免费额度 10 GB/月',
     opsExceeded: '已超出免费额度，将产生费用',
+    opsSrcOfficial: '统计周期 {c} · 数据来源 Cloudflare 官方（延迟约 15-30 分钟）',
+    opsSrcSelf: '本地实时记账 · 在"设置"配置 Cloudflare API Token 后可对齐官方数据',
+    statStorage: '总存储', statStorageFoot: '官方口径含元数据（约 6.4 KB/对象）',
+    cfUsageTitle: 'Cloudflare 官方用量对接', cfUsageTitleD: '配置后标题栏与概览的数据直接来自 Cloudflare GraphQL Analytics，与官方面板完全一致',
+    cfAccountId: 'Account ID', cfAccountIdD: 'Cloudflare 仪表盘 R2 概览页右侧（Account details → Account ID）',
+    cfApiToken: 'API Token', cfApiTokenD: '需 Account 级 "Account Analytics: Read" 权限；',
+    cfTokenSet: '已配置', cfTokenNotSet: '未配置（回退本地记账）', cfTokenKeep: '留空保留现有 Token',
+    cfCycleDay: '账单周期起始日', cfCycleDayD: '官方面板 "September 23 - October 23" 中的 "23"，1 = 自然月',
+    cfUsageHint: '官方数据有 15-30 分钟延迟，与本地实时记账并存：配置后显示官方值，未配置或请求失败自动回退本地记账。如需停用对接，清空 Account ID 保存即可。',
     statDownloads: '累计下载', todayN: '今日 {n} 次', statFiles: '文件总数', storedR2: '存储于 R2 对象存储',
     statShares: '分享链接', sharesFoot: '有效 {a} 个 · 封禁 IP {b} 个',
     chartTitle: '近 14 天下载趋势', recentTitle: '最近下载', viewAll: '查看全部', noLogsYet: '还没有下载记录',
@@ -1049,10 +1061,20 @@ const I18N = {
     navContent: 'Files', navAnalytics: 'Analytics', navSecurity: 'Security', navSystem: 'System',
     // 概览
     statTraffic: 'Monthly Traffic', usedPercent: '{n}% used · resets monthly', noLimit: 'No limit set',
-    opsALabel: 'Writes', opsBLabel: 'Reads',
-    opsATip: 'Monthly Class A operations (writes / lists) · Free tier 1M/month, resets monthly',
-    opsBTip: 'Monthly Class B operations (reads) · Free tier 10M/month, resets monthly',
+    opsALabel: 'Class A', opsBLabel: 'Class B', storageLabel: 'Storage',
+    opsATip: 'Class A operations (writes / lists) · Free tier 1M/month',
+    opsBTip: 'Class B operations (reads / HEAD) · Free tier 10M/month',
+    storageTip: 'Total storage (incl. metadata) · Free tier 10 GB/month',
     opsExceeded: 'Free tier exceeded — overage billing applies',
+    opsSrcOfficial: 'Billing cycle {c} · Source: Cloudflare official (15-30 min delay)',
+    opsSrcSelf: 'Local real-time metering · Configure a Cloudflare API token in Settings to align with official data',
+    statStorage: 'Total Storage', statStorageFoot: 'Official metric includes metadata (~6.4 KB/object)',
+    cfUsageTitle: 'Cloudflare Official Usage', cfUsageTitleD: 'Once configured, topbar & overview numbers come from Cloudflare GraphQL Analytics, identical to the official dashboard',
+    cfAccountId: 'Account ID', cfAccountIdD: 'R2 dashboard right panel (Account details → Account ID)',
+    cfApiToken: 'API Token', cfApiTokenD: 'Requires account-level "Account Analytics: Read"; ',
+    cfTokenSet: 'configured', cfTokenNotSet: 'not set (falls back to local metering)', cfTokenKeep: 'Leave empty to keep current token',
+    cfCycleDay: 'Billing cycle start day', cfCycleDayD: 'The "23" in the dashboard\'s "September 23 - October 23"; 1 = calendar month',
+    cfUsageHint: 'Official data lags 15-30 minutes and coexists with local real-time metering: official values are shown once configured, local metering is the fallback. To disable, clear the Account ID and save.',
     statDownloads: 'Total Downloads', todayN: '{n} today', statFiles: 'Files', storedR2: 'Stored in R2 object storage',
     statShares: 'Share Links', sharesFoot: '{a} active · {b} banned IPs',
     chartTitle: 'Downloads · Last 14 Days', recentTitle: 'Recent Downloads', viewAll: 'View all', noLogsYet: 'No downloads yet',
@@ -1756,6 +1778,10 @@ async function showApp(){
         <span class="bar"><i id="ops-b-bar" style="width:0%"></i></span>
         <span id="ops-b-text">—</span>
       </div>
+      <div class="traffic-pill op" id="st-pill">
+        <span class="bar"><i id="st-bar" style="width:0%"></i></span>
+        <span id="st-text">—</span>
+      </div>
       <button class="btn sm" id="theme-toggle" title="🌙 / ☀️" style="font-size:16px;padding:9px 11px;line-height:1">${document.documentElement.dataset.theme === 'light' ? '🌙' : '☀️'}</button>
       <button class="btn sm" id="lang-btn">${esc(t('switchTo'))}</button>
       <button class="btn sm" id="logout-btn">${esc(t('logout'))}</button>
@@ -1840,11 +1866,14 @@ function switchTab(tab){
   if (tab !== 'overview') void refreshTopbarStats();
 }
 
-/* ═══════════ 顶栏用量胶囊（流量 / Class A / Class B） ═══════════
+/* ═══════════ 顶栏用量胶囊（流量 / Class A / Class B / 总存储） ═══════════
  * 这些胶囊显示在标题栏，不属于任何单个视图，因此抽成独立函数：
  *   - updateTopbarStats(s)：用已有的 stats 响应更新（概览页复用，零额外请求）
  *   - refreshTopbarStats()：单独拉一次 /api/admin/stats（其它视图/操作后调用）
- * 任何一处失败都静默，不影响主流程。 */
+ * 任何一处失败都静默，不影响主流程。
+ * 数据来源（s.ops.source）：
+ *   - official：Cloudflare GraphQL 官方数据，账单周期口径，tooltip 注明周期与延迟
+ *   - self：本地装饰器实时记账（自然月），tooltip 提示可配置官方对接 */
 function updateTopbarStats(s){
   const pill = $('#traffic-pill');
   if(pill && s.traffic){
@@ -1854,20 +1883,29 @@ function updateTopbarStats(s){
       ? `${fmtSize(s.traffic.used)} / ${fmtSize(s.traffic.limit)}`
       : `${fmtSize(s.traffic.used)} / ${t('unlimitedShort')}`;
   }
-  // Class A / Class B 操作用量胶囊
+  const srcNote = s.ops?.source === 'official'
+    ? ' · ' + t('opsSrcOfficial', { c: s.ops?.cycle_label || '' })
+    : ' · ' + t('opsSrcSelf');
+  // Class A / Class B / 总存储 三个胶囊（对齐官方面板三项指标）
   // enabled=false：存储后端为 S3 兼容存储时计数无 R2 计费含义，隐藏
-  const setOpsPill = (pillId, barId, textId, ops, label, tipKey) => {
+  const setPill = (pillId, barId, textId, data, label, tipKey) => {
     const p = $(pillId);
     if (!p) return;
-    if (!ops || ops.enabled === false) { p.style.display = 'none'; return; }
+    if (!data || s.ops?.enabled === false) { p.style.display = 'none'; return; }
     p.style.display = ''; // 清除 S3 期间可能残留的内联隐藏
-    p.classList.toggle('danger', !!ops.exceeded);
-    p.title = t(tipKey) + (ops.exceeded ? ' · ' + t('opsExceeded') : '');
-    $(barId).style.width = Math.min(100, ops.percent || 0) + '%';
-    $(textId).textContent = `${label} ${fmtOps(ops.used)} / ${fmtOps(ops.limit)}`;
+    p.classList.toggle('danger', !!data.exceeded);
+    p.title = t(tipKey)
+      + (data.exceeded ? ' · ' + t('opsExceeded') : '')
+      + srcNote;
+    $(barId).style.width = Math.min(100, data.percent || 0) + '%';
+    $(textId).textContent = `${label} ${data.kind === 'bytes' ? fmtSize(data.used) : fmtOps(data.used)} / ${data.kind === 'bytes' ? fmtSize(data.limit) : fmtOps(data.limit)}`;
   };
-  setOpsPill('#ops-a-pill', '#ops-a-bar', '#ops-a-text', s.ops?.classA, t('opsALabel'), 'opsATip');
-  setOpsPill('#ops-b-pill', '#ops-b-bar', '#ops-b-text', s.ops?.classB, t('opsBLabel'), 'opsBTip');
+  setPill('#ops-a-pill', '#ops-a-bar', '#ops-a-text', s.ops?.classA, t('opsALabel'), 'opsATip');
+  setPill('#ops-b-pill', '#ops-b-bar', '#ops-b-text', s.ops?.classB, t('opsBLabel'), 'opsBTip');
+  if (s.storage) {
+    setPill('#st-pill', '#st-bar', '#st-text',
+      { ...s.storage, kind: 'bytes' }, t('storageLabel'), 'storageTip');
+  }
 }
 
 async function refreshTopbarStats(){
@@ -1904,6 +1942,12 @@ async function loadOverview(){
         <div class="label">📁 ${esc(t('statFiles'))}</div>
         <div class="value">${c.files}</div>
         <div class="foot">${esc(t('storedR2'))}</div>
+      </div>
+      <div class="stat-card glass">
+        <div class="label">💾 ${esc(t('statStorage'))}</div>
+        <div class="value">${fmtSize(s.storage?.used ?? 0)}<small>/ ${fmtSize(s.storage?.limit ?? 10*1024**3)}</small></div>
+        <div class="progress ${(s.storage?.percent ?? 0)>=80?'hot':''}"><i style="width:${Math.min(100,s.storage?.percent ?? 0)}%"></i></div>
+        <div class="foot">${esc(t('statStorageFoot'))}</div>
       </div>
       <div class="stat-card glass">
         <div class="label">🔗 ${esc(t('statShares'))}</div>
@@ -3549,6 +3593,26 @@ async function loadSettings(){
         </select>
       </div>
     </div>
+    <!-- Cloudflare 官方用量对接 -->
+    <div class="glass group">
+      <div class="row">
+        <div class="info"><div class="t">📊 ${esc(t('cfUsageTitle'))}</div><div class="d">${esc(t('cfUsageTitleD'))}</div></div>
+      </div>
+      <div class="row">
+        <div class="info"><div class="t">${esc(t('cfAccountId'))}</div><div class="d">${esc(t('cfAccountIdD'))}</div></div>
+        <input type="text" id="st-cf-account" value="${esc(s.cf_account_id ?? '')}" style="font-family:ui-monospace,monospace" placeholder="32 位 hex">
+      </div>
+      <div class="row">
+        <div class="info"><div class="t">${esc(t('cfApiToken'))}</div>
+        <div class="d">${esc(t('cfApiTokenD'))} ${s.cf_api_token_configured ? `<span style="color:#16a34a">${esc(t('cfTokenSet'))}</span>` : `<span style="color:#d97706">${esc(t('cfTokenNotSet'))}</span>`}</div></div>
+        <input type="password" id="st-cf-token" placeholder="${s.cf_api_token_configured ? esc(t('cfTokenKeep')) : ''}" autocomplete="new-password">
+      </div>
+      <div class="row">
+        <div class="info"><div class="t">${esc(t('cfCycleDay'))}</div><div class="d">${esc(t('cfCycleDayD'))}</div></div>
+        <input type="number" id="st-cf-cycle" min="1" max="28" value="${s.billing_cycle_day ?? 1}" style="max-width:90px">
+      </div>
+      <div class="tip" style="margin-top:6px;line-height:1.7">${esc(t('cfUsageHint'))}</div>
+    </div>
     <!-- 2FA 组 -->
     <div class="glass group">
       <div class="row">
@@ -3745,7 +3809,13 @@ async function loadSettings(){
       home_redirect_market: $('#st-home-market').checked,
       codes_floating_button_enabled: $('#st-codes-float').checked,
       codes_floating_button_position: $('#st-codes-pos').value,
+      cf_account_id: $('#st-cf-account')?.value.trim() ?? '',
+      billing_cycle_day: Number($('#st-cf-cycle')?.value) || 1,
+      cf_api_token: '', // 下方按"留空保留"语义重写
     };
+    // token 输入框留空 = 保留原值（避免每次保存都要重填）；只有显式输入新值/清空场景才传
+    const tokenVal = $('#st-cf-token')?.value ?? '';
+    body.cf_api_token = tokenVal.trim() === '' ? '__keep__' : tokenVal.trim();
     await api('/api/admin/settings', { method:'PUT', body: JSON.stringify(body) });
     toast(t('saved'));
     loadSettings();

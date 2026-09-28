@@ -1,8 +1,9 @@
 import type { Env } from "./types";
 import { ensureSchema, randomId, getSchemaStatus, repairDatabase } from "./db";
 import { generateCodes, makeBatchId, formatCodeStatus, findCodeByString } from "./codes";
-import { getSettings, updateSettings, invalidateSettingsCache, R2_FREE_CLASS_A, R2_FREE_CLASS_B } from "./settings";
+import { getSettings, updateSettings, invalidateSettingsCache, R2_FREE_CLASS_A, R2_FREE_CLASS_B, R2_FREE_STORAGE_BYTES } from "./settings";
 import { flushR2Ops } from "./opstats";
+import { fetchOfficialUsage, type OfficialUsage } from "./cfusage";
 import { checkAdminKey, createSession, verifySession, clientIp, rateLimitLogin, requireAdminIp } from "./auth";
 import { pickLang } from "./i18n";
 import { hashPassword } from "./public";
@@ -261,6 +262,14 @@ export async function handleAdminApi(
     invalidateSettingsCache();
     // getSettings 内部已做跨月自动兜底，无需此处重复检查和 DB 写入
     const s = await getSettings(env);
+    // ── R2 用量：官方 GraphQL 数据优先（对齐 Cloudflare 面板），回退本地自记账 ──
+    // 官方数据按"账单周期"（如 September 23 - October 23）统计，且延迟约 15-30 分钟；
+    // 自记账按自然月、实时。前端根据 source 展示对应口径说明。
+    // 官方请求与下面的 COUNT 聚合并行发起，不额外增加看板延迟（结果有 10 分钟缓存）。
+    const isR2Backend = (s.storageProvider || "r2") === "r2";
+    const officialP: Promise<OfficialUsage | null> = isR2Backend
+      ? fetchOfficialUsage(env, s).catch(() => null)
+      : Promise.resolve(null);
     const [files, shares, activeShares, totalDownloads, todayStat, chartRows, recent, banned] =
       await Promise.all([
         env.db.prepare("SELECT COUNT(*) AS c FROM files").first<{ c: number }>(),
@@ -293,6 +302,28 @@ export async function handleAdminApi(
     }
 
     const quotaExceeded = s.trafficLimitBytes > 0 && s.trafficUsedBytes >= s.trafficLimitBytes;
+
+    // ── R2 用量：官方 GraphQL 数据优先（对齐 Cloudflare 面板），回退本地自记账 ──
+    // 官方数据按"账单周期"（如 September 23 - October 23）统计，且延迟约 15-30 分钟；
+    // 自记账按自然月、实时。前端根据 source 展示对应口径说明。
+    const official = await officialP;
+    let opsSource: "official" | "self" = "self";
+    let opsCycleLabel = "";
+    let aUsed = s.r2ClassAUsed;
+    let bUsed = s.r2ClassBUsed;
+    let storageUsed: number | null = null; // null = 由本地 SUM(size) 兜底
+    if (official) {
+      opsSource = "official";
+      opsCycleLabel = official.cycleLabel;
+      aUsed = official.classA;
+      bUsed = official.classB;
+      storageUsed = official.storageBytes;
+    }
+    let storageRow: { c: number } | null = null;
+    if (storageUsed === null) {
+      storageRow = await env.db.prepare("SELECT COALESCE(SUM(size), 0) AS c FROM files").first<{ c: number }>();
+    }
+
     return json({
       traffic: {
         used: s.trafficUsedBytes,
@@ -304,23 +335,34 @@ export async function handleAdminApi(
         month: s.trafficMonth,
         quota_exceeded: quotaExceeded,
       },
-      // R2 免费额度操作用量（每月重置，删除操作免费不计数）
+      // R2 免费额度操作用量（删除操作免费不计数）
       // enabled=false：存储后端配置为 S3 兼容存储时，计数无 R2 计费含义，前端应隐藏胶囊
+      // source=official：数据来自 Cloudflare GraphQL Analytics（与官方面板一致，账单周期口径，有延迟）
+      // source=self：本地装饰器实时记账（自然月口径）
       ops: {
-        enabled: (s.storageProvider || "r2") === "r2",
+        enabled: isR2Backend,
+        source: opsSource,
+        cycle_label: opsCycleLabel,
         month: s.r2OpsMonth,
         classA: {
-          used: s.r2ClassAUsed,
+          used: aUsed,
           limit: R2_FREE_CLASS_A,
-          percent: Math.min(100, Math.round((s.r2ClassAUsed / R2_FREE_CLASS_A) * 100)),
-          exceeded: s.r2ClassAUsed >= R2_FREE_CLASS_A,
+          percent: Math.min(100, Math.round((aUsed / R2_FREE_CLASS_A) * 100)),
+          exceeded: aUsed >= R2_FREE_CLASS_A,
         },
         classB: {
-          used: s.r2ClassBUsed,
+          used: bUsed,
           limit: R2_FREE_CLASS_B,
-          percent: Math.min(100, Math.round((s.r2ClassBUsed / R2_FREE_CLASS_B) * 100)),
-          exceeded: s.r2ClassBUsed >= R2_FREE_CLASS_B,
+          percent: Math.min(100, Math.round((bUsed / R2_FREE_CLASS_B) * 100)),
+          exceeded: bUsed >= R2_FREE_CLASS_B,
         },
+      },
+      // 总存储（官方口径 = payloadSize + metadataSize，含元数据；回退 = 本地文件 SUM(size) 纯内容）
+      storage: {
+        used: storageUsed ?? (storageRow?.c ?? 0),
+        limit: R2_FREE_STORAGE_BYTES,
+        percent: Math.min(100, Math.round(((storageUsed ?? storageRow?.c ?? 0) / R2_FREE_STORAGE_BYTES) * 100)),
+        official: storageUsed !== null,
       },
       counts: {
         files: files?.c ?? 0,
@@ -1220,6 +1262,10 @@ export async function handleAdminApi(
       auto_ban: s.autoBan,
       ban_hours: s.banHours,
       traffic_used_bytes: s.trafficUsedBytes,
+      // Cloudflare 官方用量对接（token 只回传是否已配置，不回传明文/密文）
+      cf_account_id: s.cfAccountId,
+      billing_cycle_day: s.billingCycleDay,
+      cf_api_token_configured: !!s.cfApiTokenCipher,
       // Turnstile
       turnstile_mode: s.turnstileMode,
       turnstile_threshold: s.turnstileThreshold,
@@ -1356,6 +1402,23 @@ export async function handleAdminApi(
         if (cipher) patch.s3_secret_key_cipher = cipher;
       }
       // raw === "__keep__" 或不传 → 保留原值不动
+    }
+
+    // ── Cloudflare 官方用量对接（GraphQL Analytics）──
+    if (typeof body.cf_account_id === "string") patch.cf_account_id = body.cf_account_id.trim();
+    if (typeof body.billing_cycle_day === "number") {
+      const d = Math.round(body.billing_cycle_day);
+      if (d >= 1 && d <= 28) patch.billing_cycle_day = String(d);
+    }
+    // API Token：空字符串 = 清除；"__keep__" 或不传 = 保留；其他 = 加密存储
+    if (typeof body.cf_api_token === "string") {
+      const raw = body.cf_api_token.trim();
+      if (raw === "") {
+        patch.cf_api_token_cipher = "";
+      } else if (raw !== "__keep__") {
+        const cipher = await encryptSecret(raw, env.admin);
+        if (cipher) patch.cf_api_token_cipher = cipher;
+      }
     }
 
     // UI 主题

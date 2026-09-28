@@ -504,5 +504,64 @@ console.log("\n[11] addTraffic 语句顺序修复 —— 跨月清零真正生�
   eq(ts, { bytes: 150, downloads: 2 }, "traffic_stats 每日汇总正确");
 }
 
+console.log("\n[12] cfusage —— 官方用量对接：actionType 分类 / 账单周期 / GraphQL 响应解析");
+{
+  const cf = require("./build/cfusage.js");
+
+  // ① actionType → Class A / B 分类（对齐 Cloudflare 计费口径）
+  for (const a of ["PutObject", "CopyObject", "ListObjects", "CreateMultipartUpload", "UploadPart", "ListParts", "PutBucketCors"])
+    eq(cf.classifyAction(a), "a", `classifyAction(${a}) = Class A`);
+  for (const a of ["GetObject", "HeadObject", "HeadBucket"])
+    eq(cf.classifyAction(a), "b", `classifyAction(${a}) = Class B`);
+  for (const a of ["DeleteObject", "DeleteObjects", "AbortMultipartUpload", "UnknownAction"])
+    eq(cf.classifyAction(a), null, `classifyAction(${a}) = 不计费`);
+
+  // ② 账单周期（对齐官方面板 "September 23 - October 23" 的口径）
+  const inCycle = cf.billingCycleRange(23, new Date("2026-09-29T10:00:00Z"));
+  eq(inCycle.start.toISOString().slice(0, 10), "2026-09-23", "9/29 且 cycleDay=23 → 周期从本月 23 日起");
+  eq(inCycle.end.toISOString().slice(0, 10), "2026-10-23", "周期终点 = 下月 23 日");
+  eq(inCycle.label, "September 23 - October 23", "周期标签与官方面板一致");
+  const beforeCycle = cf.billingCycleRange(23, new Date("2026-09-15T00:00:00Z"));
+  eq(beforeCycle.start.toISOString().slice(0, 10), "2026-08-23", "9/15 < 23 → 周期从上月 23 日起");
+  const natural = cf.billingCycleRange(1, new Date("2026-09-29T00:00:00Z"));
+  eq(natural.start.toISOString().slice(0, 10), "2026-09-01", "cycleDay=1 → 自然月");
+  eq(cf.billingCycleRange(31).start.getUTCDate(), 28, "cycleDay 31 clamp 到 28（短月安全）");
+  eq(cf.billingCycleRange(0).start.getUTCDate(), 1, "cycleDay 0 → 回退 1");
+
+  // ③ GraphQL 响应解析：模拟官方面板截图数值（A=71 / B=223 / 总存储 6.6 MB）
+  const mockResp = {
+    data: { viewer: { accounts: [{
+      r2OperationsAdaptiveGroups: [
+        { dimensions: { actionType: "PutObject" }, sum: { requests: 30 } },
+        { dimensions: { actionType: "ListObjects" }, sum: { requests: 41 } },
+        { dimensions: { actionType: "GetObject" }, sum: { requests: 200 } },
+        { dimensions: { actionType: "HeadObject" }, sum: { requests: 23 } },
+        { dimensions: { actionType: "DeleteObject" }, sum: { requests: 999 } }, // 免费，不累加
+      ],
+      r2StorageAdaptiveGroups: [
+        { dimensions: { datetimeHour: "2026-09-29T08:00:00Z" }, max: { payloadSize: 6920601.6, metadataSize: 0 } },
+      ],
+    }] } },
+  };
+  // 让数值凑整：改用精确数
+  mockResp.data.viewer.accounts[0].r2StorageAdaptiveGroups[0].max.payloadSize = 6600000;
+  const u = cf.parseOfficialUsage(mockResp, "September 23 - October 23");
+  eq(u.classA, 71, "官方响应解析 Class A = 30+41 = 71（Delete 999 不计入）");
+  eq(u.classB, 223, "官方响应解析 Class B = 200+23 = 223");
+  eq(u.storageBytes, 6600000, "存储 = payloadSize + metadataSize");
+  eq(u.cycleLabel, "September 23 - October 23", "周期标签透传");
+  eq(cf.parseOfficialUsage({ errors: [{ message: "bad token" }] }, ""), null, "GraphQL errors → null（回退自记账）");
+  eq(cf.parseOfficialUsage({ data: { viewer: { accounts: [] } } }, ""), null, "无 accounts → null");
+  eq(cf.parseOfficialUsage({}, ""), null, "空数据（无 accounts）→ null 回退自记账，不抛错");
+
+  // ④ settings：billing_cycle_day 读取 clamp（1-28）
+  const { env: env4 } = freshEnv();
+  env4.db.prepare("INSERT INTO settings(key, value) VALUES('billing_cycle_day', '99')").run();
+  const s4 = await readSettings(env4);
+  eq(s4.billingCycleDay, 28, "billing_cycle_day=99 → clamp 28");
+  env4.db.prepare("UPDATE settings SET value = '0' WHERE key = 'billing_cycle_day'").run();
+  eq((await readSettings(env4)).billingCycleDay, 1, "billing_cycle_day=0 → 回退 1");
+}
+
 console.log(`\n══════════ 结果: ${passed} 通过, ${failed} 失败 ══════════`);
 process.exit(failed > 0 ? 1 : 0);
