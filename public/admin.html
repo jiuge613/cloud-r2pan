@@ -319,6 +319,9 @@ body {
 .traffic-pill .bar i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg,#34d399,#0a84ff); transition: width .5s cubic-bezier(.22,1,.36,1); }
 .traffic-pill.danger .bar i { background: linear-gradient(90deg,#fbbf24,#ff453a); }
 .traffic-pill.danger { color: #ffb3ae; }
+/* Class A / B 操作用量胶囊 —— 紧凑展示，详情看悬浮提示 */
+.traffic-pill.op { cursor: default; gap: 7px; padding: 8px 12px; }
+.traffic-pill.op .bar { width: 34px; }
 
 /* ── 侧边栏导航 ────────────────────────── */
 .sidebar {
@@ -653,6 +656,10 @@ body {
   .tbl th:nth-child(n+5), .tbl td:nth-child(n+5) { display: none; }
   .topbar .sub { display: none; }
 }
+/* 操作用量胶囊比流量胶囊更晚出现、更早让位，避免 720-900px 顶栏拥挤 */
+@media (max-width: 900px) {
+  .traffic-pill.op { display: none; }
+}
 </style>
 </head>
 <body>
@@ -676,6 +683,10 @@ const I18N = {
     navContent: '文件管理', navAnalytics: '运营分析', navSecurity: '安全中心', navSystem: '系统设置',
     // 概览
     statTraffic: '本月流量', usedPercent: '已用 {n}% · 跨月自动重置', noLimit: '未设置限额',
+    opsALabel: '写入', opsBLabel: '读取',
+    opsATip: '本月 Class A 操作（写入 / 列表）· 免费额度 100 万次/月，跨月自动重置',
+    opsBTip: '本月 Class B 操作（读取）· 免费额度 1000 万次/月，跨月自动重置',
+    opsExceeded: '已超出免费额度，将产生费用',
     statDownloads: '累计下载', todayN: '今日 {n} 次', statFiles: '文件总数', storedR2: '存储于 R2 对象存储',
     statShares: '分享链接', sharesFoot: '有效 {a} 个 · 封禁 IP {b} 个',
     chartTitle: '近 14 天下载趋势', recentTitle: '最近下载', viewAll: '查看全部', noLogsYet: '还没有下载记录',
@@ -700,6 +711,11 @@ const I18N = {
     folderName: '文件夹名称', folderNamePh: '如：项目资料 2024',
     folderNameTip: '不能包含 \\ / : * ? " < > | 等字符，长度 ≤ 80，且不能与现有文件或文件夹重名',
     folderCreated: '文件夹已创建', folderItems: '{n} 项',
+    editFile: '编辑', editorLoading: '加载中…',
+    editorUnsaved: '有未保存的修改，确定放弃并关闭吗？',
+    editorHint: '字符 {c} · 行 {l} · 保存后以 UTF-8 写回原文件（同名同路径）',
+    fileSaved: '已保存', savedSize: '大小：{s}',
+    editorTooLarge: '文件超过 2 MB，不支持在线编辑', editorBinary: '该文件类型不支持在线编辑',
     deleteFolderT: '删除文件夹',
     deleteFolderD: '确定删除「{name}」？将连同其中 {files} 个文件、{folders} 个子文件夹（共 {size}）一并删除，此操作不可恢复。',
     folderDeleted: '文件夹已删除（{files} 个文件）',
@@ -1033,6 +1049,10 @@ const I18N = {
     navContent: 'Files', navAnalytics: 'Analytics', navSecurity: 'Security', navSystem: 'System',
     // 概览
     statTraffic: 'Monthly Traffic', usedPercent: '{n}% used · resets monthly', noLimit: 'No limit set',
+    opsALabel: 'Writes', opsBLabel: 'Reads',
+    opsATip: 'Monthly Class A operations (writes / lists) · Free tier 1M/month, resets monthly',
+    opsBTip: 'Monthly Class B operations (reads) · Free tier 10M/month, resets monthly',
+    opsExceeded: 'Free tier exceeded — overage billing applies',
     statDownloads: 'Total Downloads', todayN: '{n} today', statFiles: 'Files', storedR2: 'Stored in R2 object storage',
     statShares: 'Share Links', sharesFoot: '{a} active · {b} banned IPs',
     chartTitle: 'Downloads · Last 14 Days', recentTitle: 'Recent Downloads', viewAll: 'View all', noLogsYet: 'No downloads yet',
@@ -1057,6 +1077,11 @@ const I18N = {
     folderName: 'Folder name', folderNamePh: 'e.g. Project 2024',
     folderNameTip: 'Cannot contain \\ / : * ? " < > | , max 80 chars, must not duplicate an existing file or folder',
     folderCreated: 'Folder created', folderItems: '{n} item(s)',
+    editFile: 'Edit', editorLoading: 'Loading…',
+    editorUnsaved: 'You have unsaved changes — discard and close?',
+    editorHint: '{c} chars · {l} lines · saved back to the original file as UTF-8 (same name & path)',
+    fileSaved: 'Saved', savedSize: 'Size: {s}',
+    editorTooLarge: 'File exceeds 2 MB — online editing not supported', editorBinary: 'This file type does not support online editing',
     deleteFolderT: 'Delete folder',
     deleteFolderD: 'Delete "{name}"? Its {files} file(s) and {folders} sub-folder(s) ({size} total) will be permanently removed. This cannot be undone.',
     folderDeleted: 'Folder deleted ({files} files)',
@@ -1413,6 +1438,17 @@ function fmtSize(n){
   do { n /= 1024; i++; } while(n >= 1024 && i < u.length-1);
   return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + u[i];
 }
+// 操作次数紧凑格式：中文用「万」，英文用 k / M（100万 → 100万 / 1M）
+function fmtOps(n){
+  n = Number(n)||0;
+  if (LANG === 'zh') {
+    if (n >= 10000) return (Math.round(n / 1000) / 10) + '万';
+    return String(n);
+  }
+  if (n >= 1e6) return (Math.round(n / 1e5) / 10) + 'M';
+  if (n >= 1e3) return (Math.round(n / 100) / 10) + 'k';
+  return String(n);
+}
 function fmtTime(ts){
   if(!ts) return '—';
   const d = new Date(Number(ts)), p = x => String(x).padStart(2,'0');
@@ -1430,6 +1466,22 @@ const EXT_COLORS = {
 const extOf = n => (/\.([a-z0-9]+)$/i.exec(n||'')||[])[1]?.toLowerCase() || '';
 const extColor = n => EXT_COLORS[extOf(n)] || EXT_COLORS.default;
 const ficon = name => `<span class="ficon" style="color:${extColor(name)}">${esc((extOf(name)||'?').toUpperCase().slice(0,4))}</span>`;
+
+/* ═══════════ 在线文本编辑：可编辑判定（与后端 src/editable.ts 同规则） ═══════════ */
+const MAX_TEXT_EDIT_BYTES = 2 * 1024 * 1024;
+const TEXT_EDIT_EXTS = new Set(('txt text log nfo srt vtt csv tsv md markdown mdx rst adoc org tex html htm xhtml xml svg ' +
+  'json jsonc json5 yaml yml toml ini cfg conf properties env editorconfig gitignore gitattributes ' +
+  'js mjs cjs ts mts cts jsx tsx css scss sass less styl sh bash zsh fish bat cmd ps1 ' +
+  'py pyw rb pl lua php phtml go rs java kt kts scala groovy gradle c h cpp cc cxx hpp hh cs m mm ' +
+  'swift dart vue svelte astro sql r jl ex exs erl hrl clj cljs hs vb vbs zig nim lock diff patch graphql gql proto prisma makefile cmake dockerfile ipynb').split(' '));
+function isTextFile(name, mime, size){
+  if (Number(size) > MAX_TEXT_EDIT_BYTES) return false;
+  const m = String(mime||'').toLowerCase().split(';')[0].trim();
+  if (/^(image|video|audio)\//.test(m) && !/^image\/svg/.test(m)) return false;
+  if (/^(application\/(zip|gzip|x-tar|x-7z-compressed|x-rar-compressed|vnd\.rar|pdf|msword|x-msdownload|vnd\.android\.package-archive)|application\/vnd\.openxmlformats-)/.test(m)) return false;
+  if (m.startsWith('text/') || m === 'application/json' || m === 'application/javascript' || m === 'application/xml' || /\+(xml|json)$/.test(m)) return true;
+  return TEXT_EDIT_EXTS.has(extOf(name));
+}
 
 async function api(path, opts={}){
   const r = await fetch(path, { credentials:'same-origin', ...opts,
@@ -1696,6 +1748,14 @@ async function showApp(){
         <span class="bar"><i id="pill-bar" style="width:0%"></i></span>
         <span id="pill-text">— / —</span>
       </div>
+      <div class="traffic-pill op" id="ops-a-pill">
+        <span class="bar"><i id="ops-a-bar" style="width:0%"></i></span>
+        <span id="ops-a-text">—</span>
+      </div>
+      <div class="traffic-pill op" id="ops-b-pill">
+        <span class="bar"><i id="ops-b-bar" style="width:0%"></i></span>
+        <span id="ops-b-text">—</span>
+      </div>
       <button class="btn sm" id="theme-toggle" title="🌙 / ☀️" style="font-size:16px;padding:9px 11px;line-height:1">${document.documentElement.dataset.theme === 'light' ? '🌙' : '☀️'}</button>
       <button class="btn sm" id="lang-btn">${esc(t('switchTo'))}</button>
       <button class="btn sm" id="logout-btn">${esc(t('logout'))}</button>
@@ -1788,6 +1848,20 @@ async function loadOverview(){
       ? `${fmtSize(s.traffic.used)} / ${fmtSize(s.traffic.limit)}`
       : `${fmtSize(s.traffic.used)} / ${t('unlimitedShort')}`;
   }
+  // Class A / Class B 操作用量胶囊（与流量胶囊同款展示：进度条 + 已用/额度）
+  // S3 后端时 ops.enabled=false → 隐藏（计数无 R2 计费含义）
+  const setOpsPill = (pillId, barId, textId, ops, label, tipKey) => {
+    const p = $(pillId);
+    if (!p) return;
+    if (!ops || ops.enabled === false) { p.style.display = 'none'; return; }
+    p.style.display = ''; // 清除 S3 期间可能残留的内联隐藏
+    p.classList.toggle('danger', !!ops.exceeded);
+    p.title = t(tipKey) + (ops.exceeded ? ' · ' + t('opsExceeded') : '');
+    $(barId).style.width = Math.min(100, ops.percent || 0) + '%';
+    $(textId).textContent = `${label} ${fmtOps(ops.used)} / ${fmtOps(ops.limit)}`;
+  };
+  setOpsPill('#ops-a-pill', '#ops-a-bar', '#ops-a-text', s.ops?.classA, t('opsALabel'), 'opsATip');
+  setOpsPill('#ops-b-pill', '#ops-b-bar', '#ops-b-text', s.ops?.classB, t('opsBLabel'), 'opsBTip');
   const maxDl = Math.max(1, ...s.chart.map(c => c.downloads));
   const c = s.counts;
   const tip = n => LANG === 'zh' ? `${n} ${t('times')} · ${fmtSize(0)}` : `${n} · ${fmtSize(0)}`;
@@ -1891,7 +1965,7 @@ async function loadFiles(){
       </div>
       ${r.folders.length || r.files.length ? `
       <div style="overflow-x:auto"><table class="tbl">
-        <thead><tr><th style="width:44px"></th><th>${esc(t('colName'))}</th><th>${esc(t('colSize'))}</th><th>${esc(t('colShareCount'))}</th><th>${esc(t('colDownloads'))}</th><th>${esc(t('colUploaded'))}</th><th style="width:210px">${esc(t('colActions'))}</th></tr></thead>
+        <thead><tr><th style="width:44px"></th><th>${esc(t('colName'))}</th><th>${esc(t('colSize'))}</th><th>${esc(t('colShareCount'))}</th><th>${esc(t('colDownloads'))}</th><th>${esc(t('colUploaded'))}</th><th style="width:280px">${esc(t('colActions'))}</th></tr></thead>
         <tbody>
           ${r.folders.map(d => `
           <tr>
@@ -1917,6 +1991,7 @@ async function loadFiles(){
             <td class="num">${f.download_count}</td>
             <td class="num">${fmtTime(f.uploaded_at)}</td>
             <td><div class="actions-cell">
+              ${isTextFile(f.name, f.mime, f.size) ? `<button class="btn sm" data-edit="${f.id}" data-ename="${esc(f.name)}" title="${esc(t('editFile'))}">✏️ ${esc(t('editFile'))}</button>` : ''}
               <button class="btn sm primary" data-share="${f.id}">${esc(t('createShare'))}</button>
               ${f.direct_link_id
                 ? `<button class="btn sm amber" data-vdirect="${esc(f.direct_link_id)}">${esc(t('viewDirect'))}</button>`
@@ -1942,6 +2017,7 @@ async function loadFiles(){
   $$('[data-vfdirect]').forEach(b => b.onclick = () => openViewDirect(b.dataset.vfdirect));
   $$('[data-fdel]').forEach(b => b.onclick = () => deleteFolderFlow(b.dataset.fdel, b.dataset.fname));
   $$('[data-share]').forEach(b => b.onclick = () => openShareModal(b.dataset.share));
+  $$('[data-edit]').forEach(b => b.onclick = () => openEditorModal(b.dataset.edit, b.dataset.ename));
   $$('[data-direct]').forEach(b => b.onclick = () => openDirectModal(b.dataset.direct, null));
   $$('[data-vdirect]').forEach(b => b.onclick = () => openViewDirect(b.dataset.vdirect));
   $$('[data-del]').forEach(b => b.onclick = async () => {
@@ -1950,6 +2026,97 @@ async function loadFiles(){
     toast(t('fileDeleted'));
     loadFiles();
   });
+}
+
+/* ═══════════ 在线文本编辑器弹窗 ═══════════ */
+function openEditorModal(fileId, fileName){
+  openModal(`
+    <h3 style="display:flex;align-items:center;gap:8px">✏️ <span style="word-break:break-all">${esc(fileName)}</span></h3>
+    <div class="sub" id="ed-hint">${esc(t('editorLoading'))}</div>
+    <textarea id="ed-text" spellcheck="false" wrap="off" style="width:100%;box-sizing:border-box;min-height:55vh;resize:vertical;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Courier New',monospace;font-size:13px;line-height:1.55;
+      padding:14px;border-radius:14px;border:1px solid var(--stroke-strong);background:var(--sf-input);color:var(--text);
+      outline:none;white-space:pre;overflow:auto" disabled></textarea>
+    <div class="actions" style="margin-top:12px">
+      <span id="ed-stats" style="flex:1;font-size:12px;opacity:.6;align-self:center"></span>
+      <button class="btn" data-x>${esc(t('cancel'))}</button>
+      <button class="btn primary" id="ed-save" disabled>💾 ${esc(t('confirm'))}</button>
+    </div>`);
+  // 编辑器需要更宽的弹窗
+  const modalEl = $('#modal .modal');
+  if (modalEl) { modalEl.style.width = 'min(96vw, 1000px)'; modalEl.style.maxHeight = '92vh'; modalEl.style.overflow = 'auto'; }
+
+  const ta = $('#ed-text'), saveBtn = $('#ed-save'), stats = $('#ed-stats'), hint = $('#ed-hint');
+  let original = '', dirty = false, encoding = 'utf-8';
+
+  const updateStats = () => {
+    const v = ta.value;
+    const lines = v ? v.split('\n').length : 1;
+    stats.textContent = t('editorHint', { c: v.length.toLocaleString(), l: lines.toLocaleString() });
+    dirty = v !== original;
+    saveBtn.disabled = !dirty;
+    saveBtn.style.opacity = dirty ? '1' : '.55';
+    // 输入发生变化 → 撤销两段式关闭的"已警告"状态，避免armed残留导致新修改被一键关闭丢弃
+    if (closeArmed && dirty) {
+      closeArmed = false;
+      $('[data-x]')?.classList.remove('danger');
+      hint.textContent = `${fmtSize(new TextEncoder().encode(v).length)} · ${encoding}`;
+    }
+  };
+
+  // 两段式关闭：有未保存修改时第一次点关闭只提示（按钮变 danger），再点才放弃 —— 避免嵌套弹窗销毁编辑器
+  let closeArmed = false;
+  const tryClose = () => {
+    if (dirty && !closeArmed) {
+      closeArmed = true;
+      hint.innerHTML = `<span style="color:var(--btn-danger-color,#ff453a);font-weight:600">${esc(t('editorUnsaved'))}</span>`;
+      $('[data-x]').classList.add('danger');
+      return;
+    }
+    closeModal();
+  };
+  $('[data-x]').onclick = tryClose;
+  $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') tryClose(); });
+
+  saveBtn.onclick = async () => {
+    saveBtn.disabled = true;
+    try{
+      const r = await api(`/api/admin/files/${fileId}/content`, {
+        method: 'PUT',
+        headers: { 'content-type': 'text/plain;charset=utf-8' },
+        body: ta.value,
+      });
+      original = ta.value; dirty = false; closeArmed = false;
+      $('[data-x]')?.classList.remove('danger');
+      hint.textContent = `${fmtSize(r.size)} · ${encoding}`;
+      updateStats();
+      toast(t('fileSaved') + ' · ' + t('savedSize', { s: fmtSize(r.size) }));
+      loadFiles();
+    }catch(e){
+      saveBtn.disabled = false;
+      toast(e.message, 'err');
+    }
+  };
+  ta.addEventListener('input', updateStats);
+  ta.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (!saveBtn.disabled) saveBtn.click(); }
+  });
+
+  (async () => {
+    try{
+      const r = await api(`/api/admin/files/${fileId}/content`);
+      original = r.content ?? '';
+      encoding = r.encoding || 'utf-8';
+      ta.value = original;
+      ta.disabled = false;
+      hint.textContent = `${fmtSize(r.size)} · ${encoding}`;
+      updateStats();
+      ta.focus();
+    }catch(e){
+      hint.textContent = e.message;
+      toast(e.message, 'err');
+    }
+  })();
 }
 
 /* ═══════════ 新建文件夹弹窗 ═══════════ */

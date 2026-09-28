@@ -1,13 +1,15 @@
 import type { Env } from "./types";
 import { ensureSchema, randomId, getSchemaStatus, repairDatabase } from "./db";
 import { generateCodes, makeBatchId, formatCodeStatus, findCodeByString } from "./codes";
-import { getSettings, updateSettings } from "./settings";
+import { getSettings, updateSettings, invalidateSettingsCache, R2_FREE_CLASS_A, R2_FREE_CLASS_B } from "./settings";
+import { flushR2Ops } from "./opstats";
 import { checkAdminKey, createSession, verifySession, clientIp, rateLimitLogin, requireAdminIp } from "./auth";
 import { pickLang } from "./i18n";
 import { hashPassword } from "./public";
 import { parseUA } from "./ua";
 import { encryptSecret, decryptSecret, totpGenerateSecret, totpVerify, totpUri, totpGenerateRecoveryCodes, sha256Hex, safeEqual } from "./crypto";
 import { createStorageProvider, type StorageProvider } from "./storage";
+import { MAX_TEXT_EDIT_BYTES, checkEditable, decodeText } from "./editable";
 import {
   normalizeDirPath,
   validateFolderName,
@@ -253,6 +255,10 @@ export async function handleAdminApi(
 
   // ── 概览统计 ──────────────────────────────────────
   if (path === "/api/admin/stats" && method === "GET") {
+    // 先把操作计数的 isolate 内未落库增量强制写入，再失效缓存重读，
+    // 保证标题栏 / 概览看到的用量包含最近 15 秒内的操作。
+    await flushR2Ops(env).catch(() => {});
+    invalidateSettingsCache();
     // getSettings 内部已做跨月自动兜底，无需此处重复检查和 DB 写入
     const s = await getSettings(env);
     const [files, shares, activeShares, totalDownloads, todayStat, chartRows, recent, banned] =
@@ -297,6 +303,24 @@ export async function handleAdminApi(
             : 0,
         month: s.trafficMonth,
         quota_exceeded: quotaExceeded,
+      },
+      // R2 免费额度操作用量（每月重置，删除操作免费不计数）
+      // enabled=false：存储后端配置为 S3 兼容存储时，计数无 R2 计费含义，前端应隐藏胶囊
+      ops: {
+        enabled: (s.storageProvider || "r2") === "r2",
+        month: s.r2OpsMonth,
+        classA: {
+          used: s.r2ClassAUsed,
+          limit: R2_FREE_CLASS_A,
+          percent: Math.min(100, Math.round((s.r2ClassAUsed / R2_FREE_CLASS_A) * 100)),
+          exceeded: s.r2ClassAUsed >= R2_FREE_CLASS_A,
+        },
+        classB: {
+          used: s.r2ClassBUsed,
+          limit: R2_FREE_CLASS_B,
+          percent: Math.min(100, Math.round((s.r2ClassBUsed / R2_FREE_CLASS_B) * 100)),
+          exceeded: s.r2ClassBUsed >= R2_FREE_CLASS_B,
+        },
       },
       counts: {
         files: files?.c ?? 0,
@@ -390,6 +414,68 @@ export async function handleAdminApi(
     const st = await storage(env);
     ctx.waitUntil(st.delete(file.key).catch(() => {}));
     return json({ ok: true });
+  }
+
+  // ══════════════════════════════════════════════════════
+  // 在线文本编辑
+  //   GET /api/admin/files/:id/content  读取文本内容（UTF-8/UTF-16 按 BOM 解码）
+  //   PUT /api/admin/files/:id/content  写回原对象（同 key 同名同路径，更新 size）
+  // 两个端点都强制 checkEditable：大小 ≤ 2MB 且非二进制类型，否则 415
+  // ══════════════════════════════════════════════════════
+  const contentMatch = /^\/api\/admin\/files\/([^/]+)\/content$/.exec(path);
+  if (contentMatch && (method === "GET" || method === "PUT")) {
+    const fileId = contentMatch[1];
+    const file = await env.db
+      .prepare("SELECT id, key, name, mime, size FROM files WHERE id = ?1")
+      .bind(fileId)
+      .first<{ id: string; key: string; name: string; mime: string; size: number }>();
+    if (!file) return json({ error: msg(req, "文件不存在", "File not found") }, 404);
+
+    const editable = checkEditable(file.name, file.mime, file.size);
+    if (!editable.editable) {
+      const zh = editable.reason === "too_large"
+        ? `文件过大（超过 ${Math.floor(MAX_TEXT_EDIT_BYTES / 1024 / 1024)} MB），不支持在线编辑`
+        : "该文件类型不支持在线编辑";
+      const en = editable.reason === "too_large"
+        ? `File too large (over ${Math.floor(MAX_TEXT_EDIT_BYTES / 1024 / 1024)} MB) for online editing`
+        : "This file type does not support online editing";
+      return json({ error: msg(req, zh, en), reason: editable.reason }, 415);
+    }
+
+    const st = await storage(env);
+
+    if (method === "GET") {
+      const obj = await st.get(file.key);
+      if (!obj) {
+        return json({ error: msg(req, "存储对象不存在，文件可能已损坏", "Storage object missing — the file may be corrupted") }, 404);
+      }
+      const buf = await new Response(obj.body).arrayBuffer();
+      const { text, encoding } = decodeText(buf);
+      return json({ id: file.id, name: file.name, mime: file.mime, size: file.size, encoding, content: text });
+    }
+
+    // PUT —— 请求体为原始文本（text/plain），写回同一个对象 key
+    const rawBody = await req.text();
+    const newBytes = new TextEncoder().encode(rawBody);
+    if (newBytes.byteLength > MAX_TEXT_EDIT_BYTES) {
+      return json({
+        error: msg(req, `保存失败：内容超过 ${Math.floor(MAX_TEXT_EDIT_BYTES / 1024 / 1024)} MB 上限`, `Save failed: content exceeds the ${Math.floor(MAX_TEXT_EDIT_BYTES / 1024 / 1024)} MB limit`),
+        reason: "too_large",
+      }, 413);
+    }
+    try {
+      await st.put(file.key, newBytes.buffer as ArrayBuffer, {
+        contentType: file.mime || "text/plain; charset=utf-8",
+        contentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      });
+    } catch (err: any) {
+      return json({ error: msg(req, "存储写入失败", "Storage write failed"), detail: String(err?.message || err) }, 500);
+    }
+    // 同名同路径不变，仅元数据里的 size 需要更新
+    await env.db.prepare("UPDATE files SET size = ?1 WHERE id = ?2")
+      .bind(newBytes.byteLength, fileId)
+      .run();
+    return json({ ok: true, id: file.id, size: newBytes.byteLength });
   }
 
   // ══════════════════════════════════════════════════════
