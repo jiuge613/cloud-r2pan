@@ -3,16 +3,16 @@
  *
  * 官方面板（R2 → Metrics）显示三项：A 类操作 / B 类操作 / 总存储，
  * 统计周期是"账单周期"（如 September 23 - October 23，由账户订阅日决定），
- * 而非自然月。本地自记账（opstats.ts）的数字与官方天然存在偏差：
- *   - 部署前的历史操作、Workers 内部调用（如 ListObjects 心跳）未被记账
- *   - isolate 回收会丢失少量 pending
+ * 而非自然月。任何靠"本地自己数 StorageProvider 调用次数"来复刻这些数字的做法
+ * 都不可能准确：
+ *   - 部署前的历史操作、Workers 内部调用（如 ListObjects 心跳）无法感知
+ *   - isolate 回收会丢失未落库的计数
  *   - 统计周期口径不同（自然月 vs 账单周期）
- *
- * 因此：配置了 Cloudflare Account ID + API Token（Account Analytics:Read 权限）
- * 后，看板数据以官方 GraphQL 数据为准（对齐官方面板）；未配置时回退本地自记账。
+ * 因此本项目**不做操作计数**，统一由 ./billing.ts 从官方接口取数；
+ * 本模块是计费接口无 R2 明细时的官方补充源（与 R2 面板完全一致）。
  *
  * 已知特性：官方 analytics 数据有约 15-30 分钟延迟，tooltip 需注明，
- * 避免用户拿它和本地实时记账对比时误以为"显示 0/偏小"是 bug。
+ * 避免用户拿它和"实时数字"对比时误以为"显示 0 / 偏小"是 bug。
  *
  * GraphQL schema（community 验证过的字段）：
  *   r2OperationsAdaptiveGroups { dimensions { actionType } sum { requests } }

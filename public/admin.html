@@ -324,6 +324,9 @@ body {
 /* 文本列不换行不截断：极端值（10 GB / 100万 / 1000万）靠 fmtOps/fmtSize 缩写控制长度 */
 .traffic-pill.op span:last-child { white-space: nowrap; }
 .traffic-pill.op .bar { width: 34px; }
+/* muted = 官方数据不可用（未对接 / 接口失败）：弱化显示"—"，不给出任何估算值 */
+.traffic-pill.muted { opacity: .5; }
+.traffic-pill.muted .bar { display: none; }
 
 /* ── 侧边栏导航 ────────────────────────── */
 .sidebar {
@@ -684,21 +687,27 @@ const I18N = {
     tabOverview: '概览', tabFiles: '文件', tabStorage: '存储浏览', tabShares: '分享', tabDirect: '直链', tabLogs: '记录', tabBans: '封禁', tabGlobal: '全球分布', tabSecurity: '安全', tabSettings: '设置', tabWebDAV: 'WebDAV',
     navContent: '文件管理', navAnalytics: '运营分析', navSecurity: '安全中心', navSystem: '系统设置',
     // 概览
-    statTraffic: '本月流量', usedPercent: '已用 {n}% · 跨月自动重置', noLimit: '未设置限额',
+    statTraffic: '本月流量', trafficTip: '唯一保留的本地账：自有网关的出网流量，官方账单无此明细', usedPercent: '已用 {n}% · 跨月自动重置', noLimit: '未设置限额',
     opsALabel: 'A 类', opsBLabel: 'B 类', storageLabel: '存储',
     opsATip: 'Class A 操作（写入 / 列表）· 免费额度 100 万次/月',
     opsBTip: 'Class B 操作（读取 / Head）· 免费额度 1000 万次/月',
     storageTip: '总存储（含元数据）· 免费额度 10 GB/月',
     opsExceeded: '已超出免费额度，将产生费用',
-    opsSrcOfficial: '统计周期 {c} · 数据来源 Cloudflare 官方（延迟约 15-30 分钟）',
-    opsSrcSelf: '本地实时记账 · 在"设置"配置 Cloudflare API Token 后可对齐官方数据',
+    usageSrcBill: '账单周期 {c} · 数据来源 Cloudflare 官方计费接口（每日更新）',
+    usageSrcAnalytics: '账单周期 {c} · 数据来源 Cloudflare R2 用量接口（延迟约 15-30 分钟）',
+    usageUnavailableTip: '{m}：暂无官方数据',
+    usageNotConfigured: '未配置 Account ID / API Token，去「设置 → Cloudflare 官方账单对接」填写',
+    usageFetchFailed: '官方接口调用失败（Token 权限不足或网络异常），请检查 Token 权限',
     statStorage: '总存储', statStorageFoot: '官方口径含元数据（约 6.4 KB/对象）',
-    cfUsageTitle: 'Cloudflare 官方用量对接', cfUsageTitleD: '配置后标题栏与概览的数据直接来自 Cloudflare GraphQL Analytics，与官方面板完全一致',
+    statBill: '本周期费用', billR2Label: 'R2', billAccountLabel: '账户合计',
+    billDailyNote: '官方账单数据每日更新 · 金额取自 Cloudflare 账单，不做本地换算',
+    billUnavailable: '未对接官方账单',
+    cfUsageTitle: 'Cloudflare 官方账单对接', cfUsageTitleD: '用量与费用统一取自 Cloudflare 官方接口，不再本地记账；未配置时相关指标显示「—」',
     cfAccountId: 'Account ID', cfAccountIdD: 'Cloudflare 仪表盘 R2 概览页右侧（Account details → Account ID）',
-    cfApiToken: 'API Token', cfApiTokenD: '需 Account 级 "Account Analytics: Read" 权限；',
-    cfTokenSet: '已配置', cfTokenNotSet: '未配置（回退本地记账）', cfTokenKeep: '留空保留现有 Token',
+    cfApiToken: 'API Token', cfApiTokenD: '需两个 Account 级权限：账单/费用 "Billing: Read" ＋ 用量明细 "Account Analytics: Read"；',
+    cfTokenSet: '已配置', cfTokenNotSet: '未配置（用量显示「—」）', cfTokenKeep: '留空保留现有 Token',
     cfCycleDay: '账单周期起始日', cfCycleDayD: '官方面板 "September 23 - October 23" 中的 "23"，1 = 自然月',
-    cfUsageHint: '官方数据有 15-30 分钟延迟，与本地实时记账并存：配置后显示官方值，未配置或请求失败自动回退本地记账。如需停用对接，清空 Account ID 保存即可。',
+    cfUsageHint: '费用来自官方 Billable Usage API（每日更新，金额以 Cloudflare 出账为准）；A/B 类操作与总存储在官方计费接口无明细时，自动降级读取 R2 用量接口。若 Token 只有其中一个权限，对应部分会显示「—」。不做本地估算，也不会回退成自算数值。停用对接：清空 Account ID 保存即可。',
     statDownloads: '累计下载', todayN: '今日 {n} 次', statFiles: '文件总数', storedR2: '存储于 R2 对象存储',
     statShares: '分享链接', sharesFoot: '有效 {a} 个 · 封禁 IP {b} 个',
     chartTitle: '近 14 天下载趋势', recentTitle: '最近下载', viewAll: '查看全部', noLogsYet: '还没有下载记录',
@@ -1060,21 +1069,27 @@ const I18N = {
     tabOverview: 'Overview', tabFiles: 'Files', tabStorage: 'Storage', tabShares: 'Shares', tabDirect: 'Direct', tabLogs: 'Logs', tabBans: 'Bans', tabGlobal: 'Global', tabSecurity: 'Security', tabSettings: 'Settings', tabWebDAV: 'WebDAV',
     navContent: 'Files', navAnalytics: 'Analytics', navSecurity: 'Security', navSystem: 'System',
     // 概览
-    statTraffic: 'Monthly Traffic', usedPercent: '{n}% used · resets monthly', noLimit: 'No limit set',
+    statTraffic: 'Monthly traffic', trafficTip: 'The only local ledger: egress from our own gateway, not itemized in Cloudflare billing', usedPercent: '{n}% used · resets monthly', noLimit: 'No limit set',
     opsALabel: 'Class A', opsBLabel: 'Class B', storageLabel: 'Storage',
     opsATip: 'Class A operations (writes / lists) · Free tier 1M/month',
     opsBTip: 'Class B operations (reads / HEAD) · Free tier 10M/month',
     storageTip: 'Total storage (incl. metadata) · Free tier 10 GB/month',
     opsExceeded: 'Free tier exceeded — overage billing applies',
-    opsSrcOfficial: 'Billing cycle {c} · Source: Cloudflare official (15-30 min delay)',
-    opsSrcSelf: 'Local real-time metering · Configure a Cloudflare API token in Settings to align with official data',
+    usageSrcBill: 'Billing cycle {c} · Source: Cloudflare official billing API (updated daily)',
+    usageSrcAnalytics: 'Billing cycle {c} · Source: Cloudflare R2 usage API (15-30 min delay)',
+    usageUnavailableTip: '{m}: no official data',
+    usageNotConfigured: 'Account ID / API token not configured — go to Settings → Cloudflare official billing',
+    usageFetchFailed: 'Official API call failed (insufficient token scope or network error)',
     statStorage: 'Total Storage', statStorageFoot: 'Official metric includes metadata (~6.4 KB/object)',
-    cfUsageTitle: 'Cloudflare Official Usage', cfUsageTitleD: 'Once configured, topbar & overview numbers come from Cloudflare GraphQL Analytics, identical to the official dashboard',
+    statBill: 'Period Cost', billR2Label: 'R2', billAccountLabel: 'Account total',
+    billDailyNote: 'Official billing data updates daily · amounts come from Cloudflare as-is',
+    billUnavailable: 'Official billing not connected',
+    cfUsageTitle: 'Cloudflare Official Billing', cfUsageTitleD: 'Usage and cost come from Cloudflare official APIs; without local metering. Unconnected metrics show "—"',
     cfAccountId: 'Account ID', cfAccountIdD: 'R2 dashboard right panel (Account details → Account ID)',
-    cfApiToken: 'API Token', cfApiTokenD: 'Requires account-level "Account Analytics: Read"; ',
-    cfTokenSet: 'configured', cfTokenNotSet: 'not set (falls back to local metering)', cfTokenKeep: 'Leave empty to keep current token',
+    cfApiToken: 'API Token', cfApiTokenD: 'Needs two account-level permissions: "Billing: Read" for cost ＋ "Account Analytics: Read" for usage; ',
+    cfTokenSet: 'configured', cfTokenNotSet: 'not set (metrics show "—")', cfTokenKeep: 'Leave empty to keep current token',
     cfCycleDay: 'Billing cycle start day', cfCycleDayD: 'The "23" in the dashboard\'s "September 23 - October 23"; 1 = calendar month',
-    cfUsageHint: 'Official data lags 15-30 minutes and coexists with local real-time metering: official values are shown once configured, local metering is the fallback. To disable, clear the Account ID and save.',
+    cfUsageHint: 'Cost comes from the official Billable Usage API (refreshed daily, amounts as invoiced by Cloudflare). Class A/B operations and storage fall back to the R2 usage API when the billing API has no R2 lines. A token with only one permission shows "—" for the missing part. No local estimation or fallback numbers. To disable, clear the Account ID and save.',
     statDownloads: 'Total Downloads', todayN: '{n} today', statFiles: 'Files', storedR2: 'Stored in R2 object storage',
     statShares: 'Share Links', sharesFoot: '{a} active · {b} banned IPs',
     chartTitle: 'Downloads · Last 14 Days', recentTitle: 'Recent Downloads', viewAll: 'View all', noLogsYet: 'No downloads yet',
@@ -1766,7 +1781,7 @@ async function showApp(){
       <div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2L21 8.5V15.5L12 22L3 15.5V8.5L12 2Z" stroke="#fff" stroke-width="1.8" stroke-linejoin="round" fill="rgba(255,255,255,.14)"/><path d="M12 2V22M3 8.5L12 15L21 8.5M3 15.5L12 9L21 15.5" stroke="#fff" stroke-width="1.2" opacity=".65"/></svg></div>
       <div><h1>${esc(siteTitle)}</h1><div class="sub">${esc(t('topbarSub'))}</div></div>
       <div class="spacer"></div>
-      <div class="traffic-pill" id="traffic-pill" title="${esc(t('statTraffic'))}">
+      <div class="traffic-pill" id="traffic-pill" title="${esc(t('statTraffic'))} · ${esc(t('trafficTip'))}">
         <span class="bar"><i id="pill-bar" style="width:0%"></i></span>
         <span id="pill-text">— / —</span>
       </div>
@@ -1871,9 +1886,12 @@ function switchTab(tab){
  *   - updateTopbarStats(s)：用已有的 stats 响应更新（概览页复用，零额外请求）
  *   - refreshTopbarStats()：单独拉一次 /api/admin/stats（其它视图/操作后调用）
  * 任何一处失败都静默，不影响主流程。
- * 数据来源（s.ops.source）：
- *   - official：Cloudflare GraphQL 官方数据，账单周期口径，tooltip 注明周期与延迟
- *   - self：本地装饰器实时记账（自然月），tooltip 提示可配置官方对接 */
+ *
+ * 数据来源口径：
+ *   - traffic：唯一保留的本地账（自有网关的出网流量），官方账单无此明细
+ *   - usage.*：一律取自服务商官方接口（s.usage.*.source = billable-usage | analytics）
+ *     拿不到时不显示任何估算值，改为"—"+ 悬浮说明（见 setPill 的 unavailable 分支）
+ */
 function updateTopbarStats(s){
   const pill = $('#traffic-pill');
   if(pill && s.traffic){
@@ -1883,28 +1901,34 @@ function updateTopbarStats(s){
       ? `${fmtSize(s.traffic.used)} / ${fmtSize(s.traffic.limit)}`
       : `${fmtSize(s.traffic.used)} / ${t('unlimitedShort')}`;
   }
-  const srcNote = s.ops?.source === 'official'
-    ? ' · ' + t('opsSrcOfficial', { c: s.ops?.cycle_label || '' })
-    : ' · ' + t('opsSrcSelf');
-  // Class A / Class B / 总存储 三个胶囊（对齐官方面板三项指标）
-  // enabled=false：存储后端为 S3 兼容存储时计数无 R2 计费含义，隐藏
-  const setPill = (pillId, barId, textId, data, label, tipKey) => {
+  const u = s.usage;
+  // 三个官方指标共用的渲染逻辑：拿不到数据就明确显示"—"，不退化成本估算值
+  const setPill = (pillId, barId, textId, metric, label, tipKey, fmt) => {
     const p = $(pillId);
     if (!p) return;
-    if (!data || s.ops?.enabled === false) { p.style.display = 'none'; return; }
-    p.style.display = ''; // 清除 S3 期间可能残留的内联隐藏
-    p.classList.toggle('danger', !!data.exceeded);
+    if (!u || u.enabled === false) { p.style.display = 'none'; return; }
+    p.style.display = ''; // 清除 S3 后端期间可能残留的内联隐藏
+    if (!metric || metric.available === false) {
+      p.classList.remove('danger');
+      p.classList.add('muted');
+      $(barId).style.width = '0%';
+      $(textId).textContent = `${label} —`;
+      p.title = t('usageUnavailableTip', { m: label })
+        + ' · ' + (u?.configured ? t('usageFetchFailed') : t('usageNotConfigured'));
+      return;
+    }
+    p.classList.remove('muted');
+    p.classList.toggle('danger', !!metric.exceeded);
+    $(barId).style.width = Math.min(100, metric.percent ?? 0) + '%';
+    $(textId).textContent = `${label} ${fmt(metric.used)} / ${fmt(metric.limit)}`;
     p.title = t(tipKey)
-      + (data.exceeded ? ' · ' + t('opsExceeded') : '')
-      + srcNote;
-    $(barId).style.width = Math.min(100, data.percent || 0) + '%';
-    $(textId).textContent = `${label} ${data.kind === 'bytes' ? fmtSize(data.used) : fmtOps(data.used)} / ${data.kind === 'bytes' ? fmtSize(data.limit) : fmtOps(data.limit)}`;
+      + (metric.exceeded ? ' · ' + t('opsExceeded') : '')
+      + ' · ' + t(metric.source === 'billable-usage' ? 'usageSrcBill' : 'usageSrcAnalytics', { c: u.cycleLabel || '' });
   };
-  setPill('#ops-a-pill', '#ops-a-bar', '#ops-a-text', s.ops?.classA, t('opsALabel'), 'opsATip');
-  setPill('#ops-b-pill', '#ops-b-bar', '#ops-b-text', s.ops?.classB, t('opsBLabel'), 'opsBTip');
-  if (s.storage) {
-    setPill('#st-pill', '#st-bar', '#st-text',
-      { ...s.storage, kind: 'bytes' }, t('storageLabel'), 'storageTip');
+  if (u) {
+    setPill('#ops-a-pill', '#ops-a-bar', '#ops-a-text', u.classA, t('opsALabel'), 'opsATip', fmtOps);
+    setPill('#ops-b-pill', '#ops-b-bar', '#ops-b-text', u.classB, t('opsBLabel'), 'opsBTip', fmtOps);
+    setPill('#st-pill', '#st-bar', '#st-text', u.storage, t('storageLabel'), 'storageTip', fmtSize);
   }
 }
 
@@ -1918,6 +1942,11 @@ async function loadOverview(){
   updateTopbarStats(s);
   const maxDl = Math.max(1, ...s.chart.map(c => c.downloads));
   const c = s.counts;
+  // 官方用量快照：拿不到就 available=false，卡片显示"—"，不退化成本地估算
+  const u = s.usage;
+  const stg = u?.storage ?? { available: false };
+  const cost = u?.cost ?? { available: false };
+  const money = n => (n == null ? '—' : (Number(n).toFixed(2)));
   const tip = n => LANG === 'zh' ? `${n} ${t('times')} · ${fmtSize(0)}` : `${n} · ${fmtSize(0)}`;
   $('#view').innerHTML = `
     ${s.traffic.quota_exceeded ? `
@@ -1945,9 +1974,20 @@ async function loadOverview(){
       </div>
       <div class="stat-card glass">
         <div class="label">💾 ${esc(t('statStorage'))}</div>
-        <div class="value">${fmtSize(s.storage?.used ?? 0)}<small>/ ${fmtSize(s.storage?.limit ?? 10*1024**3)}</small></div>
-        <div class="progress ${(s.storage?.percent ?? 0)>=80?'hot':''}"><i style="width:${Math.min(100,s.storage?.percent ?? 0)}%"></i></div>
-        <div class="foot">${esc(t('statStorageFoot'))}</div>
+        ${stg.available ? `
+        <div class="value">${fmtSize(stg.used)}<small>/ ${fmtSize(stg.limit)}</small></div>
+        <div class="progress ${(stg.percent ?? 0)>=80?'hot':''}"><i style="width:${Math.min(100,stg.percent ?? 0)}%"></i></div>
+        <div class="foot">${esc(t('statStorageFoot'))}${stg.exceeded ? ' · ' + esc(t('opsExceeded')) : ''}</div>` : `
+        <div class="value">—</div>
+        <div class="foot">${esc(u?.configured ? t('usageFetchFailed') : t('usageNotConfigured'))}</div>`}
+      </div>
+      <div class="stat-card glass">
+        <div class="label">💳 ${esc(t('statBill'))}</div>
+        ${cost.available ? `
+        <div class="value">${cost.currency ? esc(cost.currency) + ' ' : ''}${money(cost.r2)}<small>${cost.account != null && cost.account !== cost.r2 ? esc(t('billAccountLabel')) + ' ' + money(cost.account) : ''}</small></div>
+        <div class="foot">${esc(t('billDailyNote'))}${cost.periodStart ? ' · ' + esc(cost.periodStart.slice(0,10)) : ''}</div>` : `
+        <div class="value">—</div>
+        <div class="foot">${esc(u?.configured ? t('billDailyNote') : t('billUnavailable'))}</div>`}
       </div>
       <div class="stat-card glass">
         <div class="label">🔗 ${esc(t('statShares'))}</div>

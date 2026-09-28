@@ -1,9 +1,8 @@
 import type { Env } from "./types";
 import { ensureSchema, randomId, getSchemaStatus, repairDatabase } from "./db";
 import { generateCodes, makeBatchId, formatCodeStatus, findCodeByString } from "./codes";
-import { getSettings, updateSettings, invalidateSettingsCache, R2_FREE_CLASS_A, R2_FREE_CLASS_B, R2_FREE_STORAGE_BYTES } from "./settings";
-import { flushR2Ops } from "./opstats";
-import { fetchOfficialUsage, type OfficialUsage } from "./cfusage";
+import { getSettings, updateSettings, invalidateSettingsCache } from "./settings";
+import { fetchUsageSnapshot, invalidateUsageCache } from "./billing";
 import { checkAdminKey, createSession, verifySession, clientIp, rateLimitLogin, requireAdminIp } from "./auth";
 import { pickLang } from "./i18n";
 import { hashPassword } from "./public";
@@ -256,20 +255,11 @@ export async function handleAdminApi(
 
   // ── 概览统计 ──────────────────────────────────────
   if (path === "/api/admin/stats" && method === "GET") {
-    // 先把操作计数的 isolate 内未落库增量强制写入，再失效缓存重读，
-    // 保证标题栏 / 概览看到的用量包含最近 15 秒内的操作。
-    await flushR2Ops(env).catch(() => {});
-    invalidateSettingsCache();
-    // getSettings 内部已做跨月自动兜底，无需此处重复检查和 DB 写入
     const s = await getSettings(env);
-    // ── R2 用量：官方 GraphQL 数据优先（对齐 Cloudflare 面板），回退本地自记账 ──
-    // 官方数据按"账单周期"（如 September 23 - October 23）统计，且延迟约 15-30 分钟；
-    // 自记账按自然月、实时。前端根据 source 展示对应口径说明。
-    // 官方请求与下面的 COUNT 聚合并行发起，不额外增加看板延迟（结果有 10 分钟缓存）。
-    const isR2Backend = (s.storageProvider || "r2") === "r2";
-    const officialP: Promise<OfficialUsage | null> = isR2Backend
-      ? fetchOfficialUsage(env, s).catch(() => null)
-      : Promise.resolve(null);
+    // ── 用量与费用：一律取服务商官方接口（见 ./billing.ts）──
+    // 本地不再做任何操作计数，也没有"估算值"兜底：拿不到就是 available=false。
+    // 官方请求与下面的 COUNT 聚合并行发起，不额外增加看板延迟（结果有缓存）。
+    const usageP = fetchUsageSnapshot(env, s).catch(() => null);
     const [files, shares, activeShares, totalDownloads, todayStat, chartRows, recent, banned] =
       await Promise.all([
         env.db.prepare("SELECT COUNT(*) AS c FROM files").first<{ c: number }>(),
@@ -303,26 +293,8 @@ export async function handleAdminApi(
 
     const quotaExceeded = s.trafficLimitBytes > 0 && s.trafficUsedBytes >= s.trafficLimitBytes;
 
-    // ── R2 用量：官方 GraphQL 数据优先（对齐 Cloudflare 面板），回退本地自记账 ──
-    // 官方数据按"账单周期"（如 September 23 - October 23）统计，且延迟约 15-30 分钟；
-    // 自记账按自然月、实时。前端根据 source 展示对应口径说明。
-    const official = await officialP;
-    let opsSource: "official" | "self" = "self";
-    let opsCycleLabel = "";
-    let aUsed = s.r2ClassAUsed;
-    let bUsed = s.r2ClassBUsed;
-    let storageUsed: number | null = null; // null = 由本地 SUM(size) 兜底
-    if (official) {
-      opsSource = "official";
-      opsCycleLabel = official.cycleLabel;
-      aUsed = official.classA;
-      bUsed = official.classB;
-      storageUsed = official.storageBytes;
-    }
-    let storageRow: { c: number } | null = null;
-    if (storageUsed === null) {
-      storageRow = await env.db.prepare("SELECT COALESCE(SUM(size), 0) AS c FROM files").first<{ c: number }>();
-    }
+    // ── 官方用量快照（billable-usage 优先，缺失项回退 analytics）──
+    const usage = await usageP;
 
     return json({
       traffic: {
@@ -335,35 +307,12 @@ export async function handleAdminApi(
         month: s.trafficMonth,
         quota_exceeded: quotaExceeded,
       },
-      // R2 免费额度操作用量（删除操作免费不计数）
-      // enabled=false：存储后端配置为 S3 兼容存储时，计数无 R2 计费含义，前端应隐藏胶囊
-      // source=official：数据来自 Cloudflare GraphQL Analytics（与官方面板一致，账单周期口径，有延迟）
-      // source=self：本地装饰器实时记账（自然月口径）
-      ops: {
-        enabled: isR2Backend,
-        source: opsSource,
-        cycle_label: opsCycleLabel,
-        month: s.r2OpsMonth,
-        classA: {
-          used: aUsed,
-          limit: R2_FREE_CLASS_A,
-          percent: Math.min(100, Math.round((aUsed / R2_FREE_CLASS_A) * 100)),
-          exceeded: aUsed >= R2_FREE_CLASS_A,
-        },
-        classB: {
-          used: bUsed,
-          limit: R2_FREE_CLASS_B,
-          percent: Math.min(100, Math.round((bUsed / R2_FREE_CLASS_B) * 100)),
-          exceeded: bUsed >= R2_FREE_CLASS_B,
-        },
-      },
-      // 总存储（官方口径 = payloadSize + metadataSize，含元数据；回退 = 本地文件 SUM(size) 纯内容）
-      storage: {
-        used: storageUsed ?? (storageRow?.c ?? 0),
-        limit: R2_FREE_STORAGE_BYTES,
-        percent: Math.min(100, Math.round(((storageUsed ?? storageRow?.c ?? 0) / R2_FREE_STORAGE_BYTES) * 100)),
-        official: storageUsed !== null,
-      },
+      // ═══ 用量 / 费用 —— 全部来自服务商官方接口 ═══
+      // usage.enabled=false：存储后端是 S3 兼容存储（无 Cloudflare 账单）→ 前端隐藏
+      // usage.configured=false：未配 Account ID / Token → 各项 available=false 显示"—"
+      // usage.classX.source：'billable-usage'（官方计费接口）| 'analytics'（官方 R2 面板同源）
+      // 金额一律用官方 ContractedCost / CumulatedContractedCost，本地不做单价换算。
+      usage,
       counts: {
         files: files?.c ?? 0,
         shares: shares?.c ?? 0,
@@ -1452,6 +1401,9 @@ export async function handleAdminApi(
     await updateSettings(env, patch);
     // storage 配置变了，清掉缓存的 storage provider 让下次请求用新配置
     _storagePromise = null;
+    // Cloudflare 对接（Account ID / Token / 账单周期日）变更 → 官方用量缓存立即失效，
+    // 否则改完要等 30 分钟才能在标题栏看到新口径的数据。
+    invalidateUsageCache();
     return json({ ok: true });
   }
 

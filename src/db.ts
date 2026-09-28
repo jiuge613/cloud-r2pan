@@ -208,6 +208,10 @@ const MIGRATION_STATEMENTS: string[] = [
   // ═══════════ 文件夹直链 ═══════════
   "ALTER TABLE direct_links ADD COLUMN folder_path TEXT",
   "CREATE INDEX IF NOT EXISTS idx_direct_links_folder ON direct_links(folder_path)",
+  // ═══════════ 清理本地 操作用量 记账（改由官方账单接口取数，见 billing.ts）═══════════
+  // 旧的本地自记账计数器（r2_class_a_used / r2_class_b_used / r2_ops_month）
+  // 口径与官方账单不一致且不再写入，一次性删除避免遗留脏数据。
+  "DELETE FROM settings WHERE key IN ('r2_class_a_used', 'r2_class_b_used', 'r2_ops_month')",
 ];
 
 /**

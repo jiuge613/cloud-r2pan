@@ -3,13 +3,13 @@
  * 运行: node --experimental-sqlite _test/run.mjs
  * 说明: 用 node:sqlite 构造 D1 兼容 mock，对编译后的 folders.js 做真实 SQL 行为验证。
  */
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 const require = createRequire(import.meta.url);
 const f = require("./build/folders.js");
 const ed = require("./build/editable.js");
 const st = require("./build/settings.js");
-const ops = require("./build/opstats.js");
 
 let passed = 0, failed = 0;
 function ok(cond, msg) {
@@ -377,102 +377,10 @@ async function readSettings(env) {
   return st.getSettings(env);
 }
 
-console.log("\n[9] addR2Ops —— 月度计数累加 / 跨月重置 / 首次写入");
+console.log("\n[9] 本地操作记账已移除 —— 工厂不包装饰器、D1 不产生操作计数");
 {
   const { env } = freshEnv();
-
-  // 首次计数：settings 行不存在 → INSERT 分支直接写入
-  await st.addR2Ops(env, 3, 5);
-  eq(await getVal(env, "r2_class_a_used"), "3", "首次 Class A 计数 = 3");
-  eq(await getVal(env, "r2_class_b_used"), "5", "首次 Class B 计数 = 5");
-  eq(await getVal(env, "r2_ops_month"), CUR_MONTH, "统计月份 = 当月");
-
-  // 同月累加
-  await st.addR2Ops(env, 2, 7);
-  eq(await getVal(env, "r2_class_a_used"), "5", "同月 Class A 累加 3+2=5");
-  eq(await getVal(env, "r2_class_b_used"), "12", "同月 Class B 累加 5+7=12");
-
-  // 零增量不写库
-  await st.addR2Ops(env, 0, 0);
-  eq(await getVal(env, "r2_class_a_used"), "5", "零增量无副作用");
-
-  // 跨月重置：把月份拨回过去，再计数 → 从增量起算（不是累加旧值）
-  env.db.prepare("UPDATE settings SET value = '2000-01' WHERE key = 'r2_ops_month'").run();
-  await st.addR2Ops(env, 100, 200);
-  eq(await getVal(env, "r2_class_a_used"), "100", "跨月 Class A 重置为增量 100");
-  eq(await getVal(env, "r2_class_b_used"), "200", "跨月 Class B 重置为增量 200");
-  eq(await getVal(env, "r2_ops_month"), CUR_MONTH, "统计月份已同步到当月");
-
-  // getSettings 内存兜底：DB 月份停在旧月 → 读取即归零
-  const { env: env2 } = freshEnv();
-  await st.addR2Ops(env2, 42, 43);
-  env2.db.prepare("UPDATE settings SET value = '1999-12' WHERE key = 'r2_ops_month'").run();
-  const s2 = await readSettings(env2);
-  eq(s2.r2ClassAUsed, 0, "getSettings 跨月兜底：Class A 读取为 0");
-  eq(s2.r2ClassBUsed, 0, "getSettings 跨月兜底：Class B 读取为 0");
-  const s3 = await readSettings(env2);
-  eq(s3.r2OpsMonth, CUR_MONTH, "跨月兜底后 r2OpsMonth 返回当月（与 trafficMonth 行为一致）");
-}
-
-console.log("\n[10] countedProvider —— Class A/B 分类计数、实时落库与节流");
-{
-  const { env } = freshEnv();
-  const calls = [];
-  const fake = {
-    kind: "r2",
-    async put(k, b, o) { calls.push(["put", k]); if (o && o.throwIt) throw new Error("boom"); return { size: 1 }; },
-    async get(k) { calls.push(["get", k]); return null; },
-    async head(k) { calls.push(["head", k]); return null; },
-    async list(o) { calls.push(["list", o?.prefix ?? ""]); return { entries: [], truncated: false }; },
-    async delete(k) { calls.push(["delete", k]); },
-  };
-  const p = ops.countedProvider(env, fake);
-
-  // ── 干净起点：清空遗留 pending，并跨过节流窗口（MIN_FLUSH_INTERVAL_MS = 1500） ──
-  await ops.flushR2Ops(env);
-  await new Promise((r) => setTimeout(r, 1600));
-
-  // ① 核心回归：**单次**上传就必须落库。
-  //    旧策略（内存攒够 10 次 + 15s 定时器）下此断言必失败——那正是
-  //    线上"上传了文件但标题栏写入量一直是 0"的根因（跨 isolate 攒不够、
-  //    定时器在 Workers 里不保证触发）。
-  await p.put("a.txt", new Uint8Array([1]), {});
-  eq(await getVal(env, "r2_class_a_used"), "1", "单次 put 立即落库（Class A +1，看板可实时感知）");
-
-  // ② 节流窗口内的连续读取 → 合并写盘，不逐次打 D1（成本保护仍在）
-  for (let i = 0; i < 4; i++) await p.get("a.txt");
-  // ① 已写入过一次 → b 计数行存在且为 "0"（addR2Ops 同时 upsert 两个计数列）
-  const bBefore = await getVal(env, "r2_class_b_used");
-  eq(bBefore, "0", "节流窗口内的读取合并累积，未逐次写库");
-  await ops.flushR2Ops(env); // 手动取出 pending
-  eq(await getVal(env, "r2_class_b_used"), "4", "Class B = 4 次 get（合并计数不丢失）");
-
-  // ③ head / list / delete 的分类正确性
-  await p.head("a.txt");            // Class B
-  await p.list({ prefix: "d/" });   // Class A
-  await p.delete("a.txt");          // 删除免费，不计数
-  await ops.flushR2Ops(env);
-  eq(await getVal(env, "r2_class_a_used"), "2", "Class A = put + list = 2 次");
-  eq(await getVal(env, "r2_class_b_used"), "5", "Class B = get×4 + head = 5 次");
-  eq(calls.length, 8, "全部 8 次调用都透传给底层 provider");
-  ok(calls.some(c => c[0] === "delete"), "delete 正常透传（免费不计入统计）");
-
-  // ④ 累计满阈值（FLUSH_THRESHOLD = 25）→ 无视节流窗口立即自动落库
-  await ops.flushR2Ops(env);
-  for (let i = 0; i < 25; i++) await p.get("b.txt");
-  // ⑤ 底层操作失败同样计入用量（R2 对失败的 Get/Put 也计操作次数），
-  //    且异常必须原样透传给调用方，不能被记账逻辑吞掉
-  await ops.flushR2Ops(env);
-  const aBefore = Number(await getVal(env, "r2_class_a_used"));
-  let threw = null;
-  try { await p.put("boom.txt", new Uint8Array([1]), { throwIt: true }); } catch (e) { threw = e; }
-  ok(threw instanceof Error, "底层 put 抛错时异常原样透传");
-  await ops.flushR2Ops(env);
-  eq(Number(await getVal(env, "r2_class_a_used")), aBefore + 1, "失败的 put 同样计入 Class A");
-
-  // 覆盖性：createStorageProvider 工厂返回的 provider 已包计数装饰器
   const { createStorageProvider } = require("./build/storage.js");
-  const { env: env3 } = freshEnv();
   const fakeR2 = {
     put: async () => ({ size: 1, httpEtag: "e" }),
     get: async () => null,
@@ -480,10 +388,145 @@ console.log("\n[10] countedProvider —— Class A/B 分类计数、实时落库
     list: async () => ({ objects: [], truncated: false }),
     delete: async () => {},
   };
-  const prov = await createStorageProvider({ r2: fakeR2, db: env3.db }, { storageProvider: "r2" });
+  const prov = await createStorageProvider({ r2: fakeR2, db: env.db }, { storageProvider: "r2" });
   eq(prov.kind, "r2", "工厂返回 R2 provider");
+  ok(
+    !/opstats|countedProvider/.test(fs.readFileSync("src/storage.ts", "utf8")),
+    "storage.ts 不再引用计数装饰器（下列行为断言进一步印证）"
+  );
+
+  // 走一遍全部操作类型，settings 表里不应出现任何操作计数字段
   await prov.put("x", new Uint8Array([1]), {});
-  ok(prov.put !== fakeR2.put, "工厂产物已被计数装饰器包装");
+  await prov.get("x");
+  await prov.head("x");
+  await prov.list({});
+  await prov.delete("x");
+  eq(await getVal(env, "r2_class_a_used"), null, "put/list 之后不写 r2_class_a_used");
+  eq(await getVal(env, "r2_class_b_used"), null, "get/head 之后不写 r2_class_b_used");
+  eq(await getVal(env, "r2_ops_month"), null, "不再写 r2_ops_month");
+
+  // 数据类型层面也已移除
+  ok(st.addR2Ops === undefined, "settings 模块不再导出 addR2Ops");
+  const s = await readSettings(env);
+  ok(!("r2ClassAUsed" in s), "Settings 类型不再含 r2ClassAUsed");
+  ok(!("r2ClassBUsed" in s), "Settings 类型不再含 r2ClassBUsed");
+  ok(!("r2OpsMonth" in s), "Settings 类型不再含 r2OpsMonth");
+  // 唯一保留的本地账仍然可用；且这是全新空库（从未保存过设置）——覆盖
+  // "traffic_used_bytes 行不存在导致 UPDATE 影响 0 行、流量记不上"的旧缺陷
+  eq(await getVal(env, "traffic_used_bytes"), null, "前置条件：新库没有流量计数行");
+  await st.addTraffic(env, 64);
+  eq(await getVal(env, "traffic_used_bytes"), "64", "新库首笔流量落库成功（addTraffic 先补行再累加）");
+  await st.addTraffic(env, 36);
+  eq(await getVal(env, "traffic_used_bytes"), "100", "同月继续累加 64+36=100");
+}
+
+console.log("\n[10] billing —— 官方账单接口：字段映射 / 单位换算 / 数据源降级");
+{
+  const bl = require("./build/billing.js");
+
+  // ① Billable Usage API 响应解析（官方 v4 envelope）
+  const resp = {
+    success: true,
+    errors: [],
+    result: [
+      { ServiceName: "R2 Class A Operations", ServiceFamilyName: "R2", PricingQuantity: 30, PricingUnit: "Requests", ConsumedQuantity: 30, ConsumedUnit: "Requests", ContractedCost: 0.000135, CumulatedPricingQuantity: 71, CumulatedContractedCost: 0.000255, BillingCurrency: "USD", BillingPeriodStart: "2026-09-23T00:00:00Z", ChargePeriodStart: "2026-09-23T00:00:00Z", ChargePeriodEnd: "2026-09-24T00:00:00Z" },
+      { ServiceName: "R2 Class B Operations", ServiceFamilyName: "R2", PricingQuantity: 100, PricingUnit: "Requests", ConsumedQuantity: 100, ConsumedUnit: "Requests", ContractedCost: 0, CumulatedPricingQuantity: 223, CumulatedContractedCost: 0, BillingCurrency: "USD", ChargePeriodStart: "2026-09-23T00:00:00Z", ChargePeriodEnd: "2026-09-24T00:00:00Z" },
+      { ServiceName: "R2 Storage", ServiceFamilyName: "R2", PricingQuantity: 0.002, PricingUnit: "GB-month", ConsumedQuantity: 0.002, ConsumedUnit: "GB-month", ContractedCost: 0, CumulatedPricingQuantity: 0.0063, CumulatedContractedCost: 0, BillingCurrency: "USD", ChargePeriodStart: "2026-09-23T00:00:00Z", ChargePeriodEnd: "2026-09-24T00:00:00Z" },
+      { ServiceName: "Workers Standard", ServiceFamilyName: "Workers", PricingQuantity: 5, PricingUnit: "GB-seconds", ConsumedQuantity: 5, ConsumedUnit: "GB-seconds", ContractedCost: 0.5, CumulatedPricingQuantity: 9, CumulatedContractedCost: 1.25, BillingCurrency: "USD", ChargePeriodStart: "2026-09-23T00:00:00Z", ChargePeriodEnd: "2026-09-24T00:00:00Z" },
+    ],
+  };
+  const rows = bl.parseBillableUsage(resp);
+  eq(rows.length, 4, "解析出 4 行（含非 R2 产品）");
+  eq(rows[0].service, "R2 Class A Operations", "ServiceName 字段映射");
+  eq(rows[0].unit, "Requests", "PricingUnit 字段映射");
+  eq(rows[0].cumulatedQuantity, 71, "CumulatedPricingQuantity 映射为周期累计量");
+  eq(rows[0].cumulatedCost, 0.000255, "CumulatedContractedCost 映射为累计费用");
+  eq(rows[0].currency, "USD", "BillingCurrency 字段映射");
+  eq(bl.parseBillableUsage({}), [], "空响应 → 空数组（不抛错）");
+  eq(bl.parseBillableUsage(null), [], "null 响应 → 空数组（不抛错）");
+  eq(bl.parseBillableUsage(resp.result).length, 4, "兼容裸数组形态");
+
+  // 同名 Service 多行（每日一行）→ 取最新 chargeEnd 的那行做"截止当前"累计
+  const dup = [
+    { ServiceName: "R2 Class A Operations", ServiceFamilyName: "R2", PricingQuantity: 1, PricingUnit: "Requests", ContractedCost: 0, CumulatedPricingQuantity: 10, CumulatedContractedCost: 0, ChargePeriodEnd: "2026-09-24T00:00:00Z" },
+    { ServiceName: "R2 Class A Operations", ServiceFamilyName: "R2", PricingQuantity: 1, PricingUnit: "Requests", ContractedCost: 0, CumulatedPricingQuantity: 99, CumulatedContractedCost: 0, ChargePeriodEnd: "2026-09-25T00:00:00Z" },
+  ];
+  eq(bl.latestPerService(bl.parseBillableUsage(dup))[0].cumulatedQuantity, 99, "同名多行取 chargeEnd 最新的一行");
+
+  // ② ServiceName → 指标匹配（不写死字符串，按关键词 + R2 家族校验）
+  const m = bl.mapBillableRows(rows);
+  eq(m.classA.service, "R2 Class A Operations", "Class A 行命中");
+  eq(m.classB.service, "R2 Class B Operations", "Class B 行命中");
+  eq(m.storage.service, "R2 Storage", "存储行命中");
+  eq(m.currency, "USD", "币种取 BillingCurrency");
+  eq(Math.round(m.costR2 * 1e6) / 1e6, 0.000255, "R2 费用只累加 R2 家族");
+  eq(Math.round(m.costAccount * 1e6) / 1e6, 1.250255, "账户费用累加全部产品");
+  eq(m.periodStart, "2026-09-23T00:00:00Z", "账单周期起点透传");
+  eq(bl.mapBillableRows([]).rowCount, 0, "空行列表 → 无命中行");
+
+  // ③ 单位换算：可换算才换算，不能换算返回 null（宁缺勿估）
+  eq(bl.toBytes(1, "GB-month"), 1024 ** 3, "GB-month → 字节（可与 10 GB 免费额度比对）");
+  eq(bl.toBytes(1, "GB"), 1024 ** 3, "GB → 字节");
+  eq(bl.toBytes(512, "MB"), 512 * 1024 ** 2, "MB → 字节");
+  eq(bl.toBytes(1, "furlongs"), null, "未知单位 → null");
+  eq(bl.toCount(71.4, "Requests"), 71, "Requests → 整数计数");
+  eq(bl.toCount(3, "GB-month"), null, "存储类单位不能被当成操作次数");
+
+  const base = {
+    enabled: true, configured: true,
+    cycleLabel: "September 23 - October 23",
+    cycleStart: "2026-09-23T00:00:00Z", cycleEnd: "2026-10-23T00:00:00Z",
+  };
+
+  // ④ 主源：官方计费接口
+  const v = bl.buildUsageView({ ...base, bill: m, analytics: null });
+  eq(v.classA.source, "billable-usage", "Class A 优先取官方计费接口");
+  eq(v.classA.used, 71, "Class A = 71（与官方面板一致）");
+  eq(v.classB.used, 223, "Class B = 223");
+  eq(Math.round(v.storage.usedBytes), Math.round(0.0063 * 1024 ** 3), "存储 GB-month 换算为字节");
+  eq(v.classA.exceeded, false, "71 < 100 万 → 未超免费额度");
+  eq(v.cost.available, true, "费用可用");
+  eq(v.cost.currency, "USD", "币种透传");
+  eq(v.cost.r2, 0.000255, "R2 金额直接来自官方 ContractedCost");
+
+  // ⑤ 降级：计费接口没有 R2 明细 → 用同一家服务商的 R2 用量接口（仍非本地估算）
+  const analytics = { classA: 5, classB: 9, storageBytes: 6600000, cycleLabel: "September 23 - October 23" };
+  const workersOnly = bl.mapBillableRows(bl.parseBillableUsage({ result: [resp.result[3]] }));
+  const v2 = bl.buildUsageView({ ...base, bill: workersOnly, analytics });
+  eq(v2.classA.source, "analytics", "Class A 降级到 R2 用量接口");
+  eq(v2.classA.used, 5, "降级后仍取官方数值（非本地估算）");
+  eq(v2.classB.used, 9, "同理 Class B");
+  eq(v2.storage.usedBytes, 6600000, "存储降级到 analytics 的字节口径");
+  eq(v2.cost.available, true, "无 R2 明细时账户级费用依然可用");
+  eq(v2.cost.r2, 0, "R2 分项费用为 0");
+
+  // ⑥ 两个官方源都拿不到 → available=false，绝不用本地数值填充
+  const v3 = bl.buildUsageView({
+    enabled: true, configured: false, cycleLabel: "September 23 - October 23",
+    cycleStart: null, cycleEnd: null, bill: null, analytics: null,
+  });
+  eq(v3.classA.available, false, "无官方数据 → Class A 标记为不可用");
+  eq(v3.classB.available, false, "同理 Class B");
+  eq(v3.storage.available, false, "同理存储");
+  eq(v3.storage.usedBytes, null, "不可用时 storage 不返回任何字节数");
+  eq(v3.classA.used, 0, "不可用量恒为 0（前端显示破折号占位）");
+  eq(v3.classA.percent, null, "不可用时百分比为 null");
+  eq(v3.cost.available, false, "费用不可用");
+  eq(v3.cost.r2, null, "金额不做本地单价换算 → null");
+
+  // ⑦ S3 后端：不存在 Cloudflare 账单 → 前端据此隐藏相关胶囊
+  const v4 = bl.buildUsageView({ ...base, enabled: false, bill: null, analytics: null });
+  eq(v4.enabled, false, "S3 后端 → usage.enabled=false");
+
+  // ⑧ 迁移语句清理遗留的本地计数行
+  const { env: envClean } = freshEnv();
+  envClean.db.prepare("INSERT INTO settings(key, value) VALUES('r2_class_a_used','123')").run();
+  envClean.db.prepare("INSERT INTO settings(key, value) VALUES('r2_ops_month','2026-09')").run();
+  envClean.db.prepare("INSERT INTO settings(key, value) VALUES('traffic_used_bytes','7')").run();
+  envClean.db.prepare("DELETE FROM settings WHERE key IN ('r2_class_a_used', 'r2_class_b_used', 'r2_ops_month')").run();
+  eq(await getVal(envClean, "r2_class_a_used"), null, "迁移清理：旧 Class A 计数行被删除");
+  eq(await getVal(envClean, "r2_ops_month"), null, "迁移清理：旧统计月份行被删除");
+  eq(await getVal(envClean, "traffic_used_bytes"), "7", "迁移清理：流量账不受影响");
 }
 
 console.log("\n[11] addTraffic 语句顺序修复 —— 跨月清零真正生效");

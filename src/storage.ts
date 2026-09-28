@@ -501,8 +501,9 @@ export async function createStorageProvider(
     if (!env.r2) throw new Error("Storage: no R2 binding and S3 not configured");
     provider = createR2Provider(env.r2);
   }
-  // 统一挂操作计数装饰器（Class A/B 用量统计，见 opstats.ts），
-  // 管理后台 / 公开分享下载 / WebDAV 等所有经过本工厂的读写全部覆盖。
-  const { countedProvider } = await import("./opstats");
-  return countedProvider(env, provider);
+  // ⚠️ 不再包任何本地记账装饰器：R2 操作用量（Class A / B）与费用统一由
+  // src/billing.ts 从 Cloudflare 官方接口获取，本地不重复计数（也不会在
+  // 上传/下载热路径上多写一次 D1）。本地唯一保留的一笔账是流量（addTraffic），
+  // 它发生在 public.ts 的下载链路里，与本工厂无关。
+  return provider;
 }

@@ -29,12 +29,6 @@ export interface Settings {
   trafficUsedBytes: number;
   /** 当前统计月份 YYYY-MM */
   trafficMonth: string;
-  /** 本月 R2 Class A 操作已用次数（写入 / 列表，删除不计费不统计） */
-  r2ClassAUsed: number;
-  /** 本月 R2 Class B 操作已用次数（读取 / Head） */
-  r2ClassBUsed: number;
-  /** R2 操作计数的当前统计月份 YYYY-MM */
-  r2OpsMonth: string;
   /** Cloudflare Account ID（Account Tag）—— 用于 GraphQL Analytics API 拉官方用量；空 = 不对接 */
   cfAccountId: string;
   /** Cloudflare API Token 密文（需 Account Analytics:Read 权限） */
@@ -148,9 +142,6 @@ export const DEFAULT_SETTINGS: Settings = {
   trafficLimitBytes: 10 * 1024 ** 3, // 10 GB
   trafficUsedBytes: 0,
   trafficMonth: "",
-  r2ClassAUsed: 0,
-  r2ClassBUsed: 0,
-  r2OpsMonth: "",
   maxDownloadsPerIp: 2,
   countWindowHours: 24,
   autoBan: true,
@@ -204,13 +195,14 @@ function toInt(v: unknown, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-/* ═══════════ R2 免费额度（每月，Cloudflare 官方定价） ═══════════
- * Standard 存储免费层：Class A（写/列表）100 万次/月、Class B（读取）1000 万次/月、
- * 存储量 10 GB-月。仅用于看板展示与判断是否接近免费上限，不做硬性拦截。
+/* ═══════════ R2 免费额度 / 计费规则 ═══════════
+ * 这些是服务商公开的计费参数；用量与金额一律取自官方接口，见 ./billing.ts。
+ * 本项目**只保留一笔本地账**：出口流量（traffic），
+ * 因为它是自有网关的记录口径，官方账单里没有对应明细。
  */
-export const R2_FREE_CLASS_A = 1_000_000;
-export const R2_FREE_CLASS_B = 10_000_000;
-export const R2_FREE_STORAGE_BYTES = 10 * 1024 ** 3;
+export const R2_LIMIT_CLASS_A = 1_000_000;
+export const R2_LIMIT_CLASS_B = 10_000_000;
+export const R2_LIMIT_STORAGE_BYTES = 10 * 1024 ** 3;
 
 export async function getSettings(env: Env): Promise<Settings> {
   // ① 命中内存缓存 —— 5 秒内直接返回，零 D1 开销
@@ -237,17 +229,6 @@ export async function getSettings(env: Env): Promise<Settings> {
     trafficMonth = currentMonth;
   }
 
-  // R2 操作计数 —— 与流量相同的跨月自动兜底（仅修正内存返回值，DB 由 addR2Ops 原子自愈）
-  const storedOpsMonth = map.get("r2_ops_month") ?? "";
-  let r2ClassAUsed = toInt(map.get("r2_class_a_used"), 0);
-  let r2ClassBUsed = toInt(map.get("r2_class_b_used"), 0);
-  let r2OpsMonth = storedOpsMonth;
-  if (storedOpsMonth && storedOpsMonth !== currentMonth && (r2ClassAUsed > 0 || r2ClassBUsed > 0)) {
-    r2ClassAUsed = 0;
-    r2ClassBUsed = 0;
-    r2OpsMonth = currentMonth;
-  }
-
   // Cloudflare 官方用量对接（GraphQL Analytics API）
   const cycleDayRaw = toInt(map.get("billing_cycle_day"), DEFAULT_SETTINGS.billingCycleDay);
 
@@ -256,9 +237,6 @@ export async function getSettings(env: Env): Promise<Settings> {
     trafficLimitBytes: toInt(map.get("traffic_limit_bytes"), DEFAULT_SETTINGS.trafficLimitBytes),
     trafficUsedBytes,
     trafficMonth,
-    r2ClassAUsed,
-    r2ClassBUsed,
-    r2OpsMonth,
     cfAccountId: map.get("cf_account_id") ?? "",
     cfApiTokenCipher: map.get("cf_api_token_cipher") ?? null,
     billingCycleDay: Math.min(28, Math.max(1, cycleDayRaw || 1)),
@@ -348,6 +326,12 @@ export async function addTraffic(env: Env, bytes: number): Promise<void> {
   const day = now.toISOString().slice(0, 10);
 
   await env.db.batch([
+    // ⓪ 确保计数行存在（新装实例从未保存过设置时该行不存在；
+    //    缺这一步，后面的 UPDATE 会静默影响 0 行 —— 流量账"写了但没记上"）
+    env.db.prepare(
+      "INSERT INTO settings(key, value) SELECT 'traffic_used_bytes', '0' WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'traffic_used_bytes')"
+    ),
+
     // ① 更新 traffic_used_bytes —— 跨月逻辑完全内联在 SQL 里
     //    此刻 traffic_month 仍是"旧月份"：
     //    同月 → 累加旧值；跨月 → 从 0 开始加（实现真正的月度重置）
@@ -376,41 +360,5 @@ export async function addTraffic(env: Env, bytes: number): Promise<void> {
     env.db.prepare(
       "INSERT INTO traffic_stats(day, bytes, downloads) VALUES(?1, ?2, 1) ON CONFLICT(day) DO UPDATE SET bytes = bytes + excluded.bytes, downloads = downloads + excluded.downloads"
     ).bind(day, bytes),
-  ]);
-}
-
-/**
- * 累加本月 R2 操作计数（Class A / Class B），跨月自动重置。
- *
- * 与 addTraffic 同构的原子方案，且修正了语句顺序：
- *   ① 先更新两个计数器 —— CASE 内联读取 r2_ops_month（此时仍是旧月份）：
- *       同月累加、跨月从本次增量起算；行不存在时 INSERT 分支直接写入增量
- *   ② 再把 r2_ops_month 同步到当月
- * 两条语句同处一个 batch 事务，并发安全，无 read-compute-write 竞态。
- */
-export async function addR2Ops(env: Env, classA: number, classB: number): Promise<void> {
-  const a = Math.max(0, Math.round(classA));
-  const b = Math.max(0, Math.round(classB));
-  if (a === 0 && b === 0) return;
-  const month = new Date().toISOString().slice(0, 7);
-
-  // key 为硬编码字面量（r2_class_a_used / r2_class_b_used），仅 SQL 内插值使用
-  const counterUpsert = (key: string, n: number) =>
-    env.db.prepare(
-      `INSERT INTO settings(key, value) VALUES(?1, ?2)
-       ON CONFLICT(key) DO UPDATE SET value = CAST(
-         CAST(CASE
-           WHEN (SELECT value FROM settings WHERE key = 'r2_ops_month') = ?3
-           THEN COALESCE((SELECT value FROM settings WHERE key = '${key}'), '0')
-           ELSE '0'
-         END AS INTEGER) + ?2 AS TEXT)`
-    ).bind(key, String(n), month);
-
-  await env.db.batch([
-    counterUpsert("r2_class_a_used", a), // ① Class A 计数（读旧月份判定跨月）
-    counterUpsert("r2_class_b_used", b), // ① Class B 计数
-    env.db.prepare(
-      "INSERT INTO settings(key, value) VALUES('r2_ops_month', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-    ).bind(month), // ② 最后同步统计月份
   ]);
 }
