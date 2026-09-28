@@ -98,7 +98,7 @@ export interface OfficialUsage {
   cycleLabel: string;
 }
 
-const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
+export const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
 const CACHE_TTL_MS = 10 * 60 * 1000; // 官方数据本身延迟 15-30 分钟，缓存 10 分钟足够
 
 let _cache: { at: number; data: OfficialUsage | null } | null = null;
@@ -110,7 +110,7 @@ export function invalidateUsageCache(): void {
   _cacheKey = "";
 }
 
-function buildQuery(): string {
+export function buildQuery(): string {
   return `query R2Usage($accountTag: String!, $start: Time!, $end: Time!) {
   viewer {
     accounts(filter: {accountTag: $accountTag}) {

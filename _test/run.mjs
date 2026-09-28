@@ -606,5 +606,41 @@ console.log("\n[12] cfusage —— 官方用量对接：actionType 分类 / 账�
   eq((await readSettings(env4)).billingCycleDay, 1, "billing_cycle_day=0 → 回退 1");
 }
 
+console.log("\n[13] usage/diag —— 连接诊断：错误提取 / 未配置短路 / 账户 ID 格式校验");
+{
+  const bl = require("./build/billing.js");
+
+  // ① v4 envelope errors → 可读消息
+  eq(bl.extractErrors({ errors: [{ message: "Authentication error", code: 1000 }] }),
+    ["Authentication error (code 1000)"], "extractErrors：message + code 拼接");
+  eq(bl.extractErrors({ errors: [] }), [], "extractErrors：空 errors → 空数组");
+  eq(bl.extractErrors(null), [], "extractErrors：null 响应不抛错");
+  eq(bl.extractErrors({}), [], "extractErrors：无 errors 字段 → 空数组");
+
+  // ② 未配置 Token：短路返回，不发起任何网络请求（fetch 被替换成炸弹验证）
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = () => { throw new Error("网络请求不应发生"); };
+  try {
+    const { env: envD } = freshEnv();
+    const noToken = {
+      storageProvider: "r2",
+      cfAccountId: "a".repeat(32),
+      cfApiTokenCipher: null,
+      billingCycleDay: 23,
+    };
+    const r = await bl.diagnoseUsage(envD, noToken);
+    eq(r.account_id_format_ok, true, "32 位 hex Account ID → 格式通过");
+    eq(r.token_configured, false, "未配置 Token → token_configured=false");
+    eq(r.token_verify.message, "token_missing_or_decrypt_failed", "未配置 → 短路消息");
+    eq(r.cycle.start.length, 10, "周期起点为 YYYY-MM-DD（billable-usage 参数格式）");
+
+    // ③ Account ID 格式校验：仪表盘截断值（非 32 位）应被标记
+    const r2 = await bl.diagnoseUsage(envD, { ...noToken, cfAccountId: "ada2381253cac9e69c" });
+    eq(r2.account_id_format_ok, false, "18 位截断 Account ID → 格式校验失败");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 console.log(`\n══════════ 结果: ${passed} 通过, ${failed} 失败 ══════════`);
 process.exit(failed > 0 ? 1 : 0);

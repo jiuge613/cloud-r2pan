@@ -708,6 +708,25 @@ const I18N = {
     cfTokenSet: '已配置', cfTokenNotSet: '未配置（用量显示「—」）', cfTokenKeep: '留空保留现有 Token',
     cfCycleDay: '账单周期起始日', cfCycleDayD: '官方面板 "September 23 - October 23" 中的 "23"，1 = 自然月',
     cfUsageHint: '费用来自官方 Billable Usage API（每日更新，金额以 Cloudflare 出账为准）；A/B 类操作与总存储在官方计费接口无明细时，自动降级读取 R2 用量接口。若 Token 只有其中一个权限，对应部分会显示「—」。不做本地估算，也不会回退成自算数值。停用对接：清空 Account ID 保存即可。',
+    cfDiagTitle: '连接诊断', cfDiagDesc: '逐项探测 Token 有效性、账单接口、用量接口，失败时给出具体原因',
+    cfDiagRun: '运行诊断', cfDiagRunning: '探测中…',
+    diagTokenOk: '✅ Token 有效（用户令牌已激活）',
+    diagTokenSkipped: '⏭️ 账户级令牌（cfat_），跳过令牌校验',
+    diagTokenFail: '❌ Token 无效或已被撤销',
+    diagAcctFmtFail: '❌ Account ID 格式不对：应为 32 位十六进制（当前 {n} 位）。仪表盘上的 Account ID 常被界面截断，请点「复制」拿完整值',
+    diagBillOkR2: '✅ 账单接口正常（{rows} 行，R2 服务：{svc}）',
+    diagBillOkNoR2: '⚠️ 账单接口正常但无 R2 明细（共 {rows} 行：{svc}），费用仍可用，用量将降级到 R2 用量接口',
+    diagBill403: '❌ 账单接口 403：Token 缺少 "Billing: Read" 权限',
+    diagBillFail: '❌ 账单接口失败：{msg}',
+    diagGqlOk: '✅ R2 用量接口正常（A：{a} · B：{b} · 存储：{st}）',
+    diagGqlOkZero: '✅ R2 用量接口正常（本期数据为 0 或延迟 15-30 分钟）',
+    diagGqlEmpty: '⚠️ 用量接口返回空：请核对 Account ID 是否为该 Token 所属账户的完整 32 位 ID',
+    diagGql403: '❌ 用量接口 403：Token 缺少 "Account Analytics: Read" 权限',
+    diagGqlFail: '❌ 用量接口失败：{msg}',
+    diagNoToken: '❌ 未配置 API Token（或 Token 解密失败）',
+    diagAllOk: '全部通过。若顶栏仍显示「—」：失败结果有 60 秒缓存，等 1 分钟后刷新页面即可',
+    diagCycle: '当前账单周期：{c}（{s} ~ {e}）',
+    diagNetwork: '❌ 网络请求失败：{msg}（Worker 出网被拦或超时）',
     statDownloads: '累计下载', todayN: '今日 {n} 次', statFiles: '文件总数', storedR2: '存储于 R2 对象存储',
     statShares: '分享链接', sharesFoot: '有效 {a} 个 · 封禁 IP {b} 个',
     chartTitle: '近 14 天下载趋势', recentTitle: '最近下载', viewAll: '查看全部', noLogsYet: '还没有下载记录',
@@ -1090,6 +1109,25 @@ const I18N = {
     cfTokenSet: 'configured', cfTokenNotSet: 'not set (metrics show "—")', cfTokenKeep: 'Leave empty to keep current token',
     cfCycleDay: 'Billing cycle start day', cfCycleDayD: 'The "23" in the dashboard\'s "September 23 - October 23"; 1 = calendar month',
     cfUsageHint: 'Cost comes from the official Billable Usage API (refreshed daily, amounts as invoiced by Cloudflare). Class A/B operations and storage fall back to the R2 usage API when the billing API has no R2 lines. A token with only one permission shows "—" for the missing part. No local estimation or fallback numbers. To disable, clear the Account ID and save.',
+    cfDiagTitle: 'Connection diagnostics', cfDiagDesc: 'Probe token validity, billing API and usage API one by one, with exact failure reasons',
+    cfDiagRun: 'Run diagnostics', cfDiagRunning: 'Probing…',
+    diagTokenOk: '✅ Token is valid (active user token)',
+    diagTokenSkipped: '⏭️ Account-owned token (cfat_) — token verification skipped',
+    diagTokenFail: '❌ Token is invalid or revoked',
+    diagAcctFmtFail: '❌ Wrong Account ID format: expected 32 hex chars (got {n}). Dashboard often truncates it — use the copy button to get the full value',
+    diagBillOkR2: '✅ Billing API OK ({rows} rows, R2 services: {svc})',
+    diagBillOkNoR2: '⚠️ Billing API OK but no R2 lines ({rows} rows: {svc}); cost still works, usage falls back to R2 usage API',
+    diagBill403: '❌ Billing API 403: token lacks "Billing: Read" permission',
+    diagBillFail: '❌ Billing API failed: {msg}',
+    diagGqlOk: '✅ R2 usage API OK (A: {a} · B: {b} · storage: {st})',
+    diagGqlOkZero: '✅ R2 usage API OK (0 usage this cycle, or 15-30 min delay)',
+    diagGqlEmpty: '⚠️ Usage API returned empty: verify the Account ID is the full 32-char ID of the token\'s own account',
+    diagGql403: '❌ Usage API 403: token lacks "Account Analytics: Read" permission',
+    diagGqlFail: '❌ Usage API failed: {msg}',
+    diagNoToken: '❌ API Token not configured (or decryption failed)',
+    diagAllOk: 'All checks passed. If pills still show "—": failures are cached for 60s — refresh the page after a minute',
+    diagCycle: 'Current billing cycle: {c} ({s} ~ {e})',
+    diagNetwork: '❌ Network request failed: {msg} (Worker egress blocked or timeout)',
     statDownloads: 'Total Downloads', todayN: '{n} today', statFiles: 'Files', storedR2: 'Stored in R2 object storage',
     statShares: 'Share Links', sharesFoot: '{a} active · {b} banned IPs',
     chartTitle: 'Downloads · Last 14 Days', recentTitle: 'Recent Downloads', viewAll: 'View all', noLogsYet: 'No downloads yet',
@@ -3651,6 +3689,11 @@ async function loadSettings(){
         <div class="info"><div class="t">${esc(t('cfCycleDay'))}</div><div class="d">${esc(t('cfCycleDayD'))}</div></div>
         <input type="number" id="st-cf-cycle" min="1" max="28" value="${s.billing_cycle_day ?? 1}" style="max-width:90px">
       </div>
+      <div class="row">
+        <div class="info"><div class="t">🔍 ${esc(t('cfDiagTitle'))}</div><div class="d">${esc(t('cfDiagDesc'))}</div></div>
+        <button class="btn primary" id="st-cf-diag" style="padding:10px 20px;font-size:13px;border-radius:14px">${esc(t('cfDiagRun'))}</button>
+      </div>
+      <pre id="st-cf-diag-out" style="display:none;margin-top:8px;padding:14px 16px;border-radius:14px;background:var(--sf-input);border:1px solid var(--stroke-strong);color:var(--text);font-size:12.5px;line-height:1.9;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;max-width:100%"></pre>
       <div class="tip" style="margin-top:6px;line-height:1.7">${esc(t('cfUsageHint'))}</div>
     </div>
     <!-- 2FA 组 -->
@@ -3859,6 +3902,55 @@ async function loadSettings(){
     await api('/api/admin/settings', { method:'PUT', body: JSON.stringify(body) });
     toast(t('saved'));
     loadSettings();
+  });
+
+  // ── Cloudflare 官方对接「运行诊断」：后端逐项探测并返回真实失败原因 ──
+  $('#st-cf-diag')?.addEventListener('click', async () => {
+    const btn = $('#st-cf-diag'), out = $('#st-cf-diag-out');
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = t('cfDiagRunning');
+    out.style.display = 'none';
+    try {
+      const d = await api('/api/admin/usage/diag');
+      const lines = [t('diagCycle', { c: d.cycle.label, s: d.cycle.start, e: d.cycle.end })];
+      // ① Token
+      if (!d.token_configured) lines.push(t('diagNoToken'));
+      else if (d.token_verify.skipped) lines.push(t('diagTokenSkipped'));
+      else if (d.token_verify.ok) lines.push(t('diagTokenOk'));
+      else lines.push(t('diagTokenFail') + (d.token_verify.status ? ` (HTTP ${d.token_verify.status})` : ''));
+      // ② Account ID 格式
+      if (!d.account_id_format_ok) lines.push(t('diagAcctFmtFail', { n: (d.account_id || '').length }));
+      // ③ 账单接口
+      const b = d.billable_usage;
+      if (b.ok && b.r2Services.length > 0) lines.push(t('diagBillOkR2', { rows: b.rowCount, svc: b.r2Services.join(', ') }));
+      else if (b.ok && b.rowCount > 0) lines.push(t('diagBillOkNoR2', { rows: b.rowCount, svc: b.allServices.slice(0, 8).join(', ') }));
+      else if (b.ok) lines.push(t('diagBillOkNoR2', { rows: 0, svc: '—' }));
+      else if (b.status === 403) lines.push(t('diagBill403'));
+      else if (b.status === null) lines.push(t('diagNetwork', { msg: b.message }));
+      else lines.push(t('diagBillFail', { msg: `HTTP ${b.status ?? '—'} · ${b.message}` }));
+      // ④ R2 用量接口
+      const g = d.graphql;
+      if (g.ok) {
+        if ((g.classA || 0) + (g.classB || 0) > 0 || (g.storageBytes || 0) > 0)
+          lines.push(t('diagGqlOk', { a: fmtOps(g.classA ?? 0), b: fmtOps(g.classB ?? 0), st: fmtSize(g.storageBytes ?? 0) }));
+        else lines.push(t('diagGqlOkZero'));
+      }
+      else if (g.message === 'empty_accounts_check_account_id') lines.push(t('diagGqlEmpty'));
+      else if (g.status === 403) lines.push(t('diagGql403'));
+      else if (g.status === null) lines.push(t('diagNetwork', { msg: g.message }));
+      else lines.push(t('diagGqlFail', { msg: `HTTP ${g.status ?? '—'} · ${g.message}` }));
+      // 总结：有任一源通过即说明对接本身没问题
+      if (d.token_configured && d.account_id_format_ok && (d.billable_usage.ok || d.graphql.ok)) {
+        lines.push('');
+        lines.push('💡 ' + t('diagAllOk'));
+      }
+      out.textContent = lines.join('\n');
+      out.style.display = '';
+    } catch (e) {
+      toast((e.message || e) + '', 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = orig;
+    }
   });
 
   // ═══════════════════════════════════

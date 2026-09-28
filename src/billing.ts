@@ -25,7 +25,7 @@
 import type { Env } from "./types";
 import { decryptSecret } from "./crypto";
 import type { Settings } from "./settings";
-import { billingCycleRange, fetchOfficialUsage, type OfficialUsage } from "./cfusage";
+import { billingCycleRange, buildQuery, fetchOfficialUsage, parseOfficialUsage, GRAPHQL_ENDPOINT, type OfficialUsage } from "./cfusage";
 
 /* ═══════════ R2 计费规则（Cloudflare 官方 Standard storage 定价） ═══════════
  * 这些是服务商公开的计费参数，用于计算"离免费额度还有多远"，
@@ -408,4 +408,208 @@ export async function fetchUsageSnapshot(env: Env, settings: Settings): Promise<
   } finally {
     if (_inflight?.p === p) _inflight = null;
   }
+}
+
+/* ═══════════ 连接诊断（设置页「运行诊断」按钮的后端） ═══════════
+ * 正常取数路径把所有失败都折叠成 available=false（用户只见「—」），
+ * 排障时需要把每一步的真实结果暴露出来：
+ *   ① Token 本身是否有效（/user/tokens/verify，仅用户令牌支持）
+ *   ② Billable Usage API：HTTP 状态 + 官方 errors + 返回了哪些 ServiceName
+ *   ③ GraphQL Analytics：HTTP 状态 + errors + 三个指标原始值
+ * 诊断接口绕过缓存，每次点按钮都是真实探测（不给结果写缓存）。
+ */
+
+export interface DiagCheck {
+  ok: boolean;
+  status: number | null;
+  message: string;
+}
+
+export interface DiagReport {
+  account_id: string;
+  account_id_format_ok: boolean;
+  token_configured: boolean;
+  /** ① 用户令牌有效性（account-owned 令牌不支持此端点，会降级为 skipped） */
+  token_verify: DiagCheck & { skipped: boolean };
+  /** ② 账单接口 */
+  billable_usage: DiagCheck & { rowCount: number; r2Services: string[]; allServices: string[] };
+  /** ③ 用量接口（R2 面板同源） */
+  graphql: DiagCheck & { classA: number | null; classB: number | null; storageBytes: number | null };
+  cycle: { start: string; end: string; label: string };
+  generated_at: string;
+}
+
+/** v4 envelope 的 errors 数组 → 可读消息列表（纯函数，可测） */
+export function extractErrors(json: unknown): string[] {
+  const errs = (json as { errors?: unknown } | null)?.errors;
+  if (!Array.isArray(errs)) return [];
+  return errs
+    .map((e) => {
+      const o = e as { message?: unknown; code?: unknown };
+      const msg = typeof o?.message === "string" ? o.message : "";
+      return msg ? (o?.code != null ? `${msg} (code ${o.code})` : msg) : JSON.stringify(e);
+    })
+    .filter(Boolean);
+}
+
+const ACCOUNT_ID_RE = /^[0-9a-f]{32}$/i;
+
+async function cfRequest(
+  url: string,
+  token: string,
+  init: RequestInit = {}
+): Promise<{ status: number | null; json: unknown | null; error: string | null }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers ?? {}) },
+      signal: ctrl.signal,
+    });
+    let json: unknown = null;
+    try {
+      json = await res.json();
+    } catch {
+      /* 非 JSON 响应体 */
+    }
+    return { status: res.status, json, error: null };
+  } catch (e) {
+    return { status: null, json: null, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagReport> {
+  const accountId = (settings.cfAccountId || "").trim();
+  const cycle = billingCycleRange(settings.billingCycleDay);
+  const now = new Date().toISOString();
+
+  let token: string | null = null;
+  if (settings.cfApiTokenCipher) {
+    try {
+      token = await decryptSecret(settings.cfApiTokenCipher, env.admin);
+    } catch {
+      token = null; // 解密失败（如管理员密码已更换）→ 视同未配置
+    }
+  }
+
+  const report: DiagReport = {
+    account_id: accountId,
+    account_id_format_ok: ACCOUNT_ID_RE.test(accountId),
+    token_configured: !!settings.cfApiTokenCipher,
+    token_verify: { ok: false, status: null, message: "", skipped: true },
+    billable_usage: { ok: false, status: null, message: "", rowCount: 0, r2Services: [], allServices: [] },
+    graphql: { ok: false, status: null, message: "", classA: null, classB: null, storageBytes: null },
+    cycle: {
+      start: cycle.start.toISOString().slice(0, 10),
+      end: cycle.end.toISOString().slice(0, 10),
+      label: cycle.label,
+    },
+    generated_at: now,
+  };
+
+  if (!token) {
+    report.token_verify.message = "token_missing_or_decrypt_failed";
+    return report;
+  }
+
+  // ── ① Token 有效性（用户令牌专用端点；cfat_ 开头的账户令牌会 400/404，标记 skipped）──
+  {
+    const r = await cfRequest("https://api.cloudflare.com/client/v4/user/tokens/verify", token);
+    const errors = extractErrors(r.json);
+    if (r.status === 200 && (r.json as { result?: { status?: string } } | null)?.result?.status === "active") {
+      report.token_verify = { ok: true, status: 200, message: "active", skipped: false };
+    } else if (r.status === 400 || r.status === 404) {
+      // account-owned token（cfat_）不支持 /user/tokens/verify → 不算失败
+      report.token_verify = { ok: true, status: r.status, message: "skipped_account_owned_token", skipped: true };
+    } else {
+      report.token_verify = {
+        ok: false,
+        status: r.status,
+        message: r.error ?? errors.join("; ") ?? "verify_failed",
+        skipped: false,
+      };
+    }
+  }
+
+  // ── ② Billable Usage API ──
+  {
+    const url = `${BILLABLE_ENDPOINT}/${encodeURIComponent(accountId)}/billable-usage?from=${report.cycle.start}&to=${report.cycle.end}`;
+    const r = await cfRequest(url, token);
+    const errors = extractErrors(r.json);
+    if (r.status === 200) {
+      const rows = parseBillableUsage(r.json);
+      const all = [...new Set(rows.map((x) => x.service).filter(Boolean))];
+      const r2Rows = rows.filter(isR2);
+      report.billable_usage = {
+        ok: true,
+        status: 200,
+        message: rows.length > 0 ? `rows=${rows.length}` : "empty_result",
+        rowCount: rows.length,
+        r2Services: [...new Set(r2Rows.map((x) => x.service).filter(Boolean))],
+        allServices: all,
+      };
+    } else {
+      report.billable_usage = {
+        ok: false,
+        status: r.status,
+        message: r.error ?? (errors.join("; ") || `HTTP ${r.status}`),
+        rowCount: 0,
+        r2Services: [],
+        allServices: [],
+      };
+    }
+  }
+
+  // ── ③ GraphQL Analytics ──
+  {
+    const r = await cfRequest(GRAPHQL_ENDPOINT, token, {
+      method: "POST",
+      body: JSON.stringify({
+        query: buildQuery(),
+        variables: {
+          accountTag: accountId,
+          start: cycle.start.toISOString(),
+          end: cycle.end.toISOString(),
+        },
+      }),
+    });
+    const errors = extractErrors(r.json);
+    if (r.status === 200 && errors.length === 0) {
+      const parsed = parseOfficialUsage(r.json, cycle.label);
+      if (parsed) {
+        report.graphql = {
+          ok: true,
+          status: 200,
+          message: "ok",
+          classA: parsed.classA,
+          classB: parsed.classB,
+          storageBytes: parsed.storageBytes,
+        };
+      } else {
+        // HTTP 200 但拿不到 accounts[0]：通常是 Account ID 写错（token 能看到别的账户）
+        report.graphql = {
+          ok: false,
+          status: 200,
+          message: "empty_accounts_check_account_id",
+          classA: null,
+          classB: null,
+          storageBytes: null,
+        };
+      }
+    } else {
+      report.graphql = {
+        ok: false,
+        status: r.status,
+        message: r.error ?? (errors.join("; ") || `HTTP ${r.status}`),
+        classA: null,
+        classB: null,
+        storageBytes: null,
+      };
+    }
+  }
+
+  return report;
 }

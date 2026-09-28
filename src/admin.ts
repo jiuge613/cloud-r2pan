@@ -2,7 +2,7 @@ import type { Env } from "./types";
 import { ensureSchema, randomId, getSchemaStatus, repairDatabase } from "./db";
 import { generateCodes, makeBatchId, formatCodeStatus, findCodeByString } from "./codes";
 import { getSettings, updateSettings, invalidateSettingsCache } from "./settings";
-import { fetchUsageSnapshot, invalidateUsageCache } from "./billing";
+import { fetchUsageSnapshot, invalidateUsageCache, diagnoseUsage } from "./billing";
 import { checkAdminKey, createSession, verifySession, clientIp, rateLimitLogin, requireAdminIp } from "./auth";
 import { pickLang } from "./i18n";
 import { hashPassword } from "./public";
@@ -325,6 +325,14 @@ export async function handleAdminApi(
       chart,
       recent: recent.results ?? [],
     });
+  }
+
+  // ── 官方用量连接诊断（设置页「运行诊断」）──
+  // 绕过缓存直接探测三个环节：Token 有效性 / Billable Usage / GraphQL Analytics，
+  // 把真实 HTTP 状态与官方 errors 返回给前端展示，用于排障（正常取数路径全部静默降级）。
+  if (path === "/api/admin/usage/diag" && method === "GET") {
+    const s = await getSettings(env);
+    return json(await diagnoseUsage(env, s));
   }
 
   // ── 文件列表（按目录浏览）──────────────────────────
