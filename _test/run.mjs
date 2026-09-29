@@ -572,10 +572,14 @@ console.log("\n[10] billing —— 官方账单接口：字段映射 / 单位换
   envClean.db.prepare("INSERT INTO settings(key, value) VALUES('r2_class_a_used','123')").run();
   envClean.db.prepare("INSERT INTO settings(key, value) VALUES('r2_ops_month','2026-09')").run();
   envClean.db.prepare("INSERT INTO settings(key, value) VALUES('traffic_used_bytes','7')").run();
+  envClean.db.prepare("INSERT INTO settings(key, value) VALUES('traffic_limit_bytes','10737418240')").run();
   envClean.db.prepare("DELETE FROM settings WHERE key IN ('r2_class_a_used', 'r2_class_b_used', 'r2_ops_month')").run();
+  // 新增迁移：流量限额 10 GB（旧默认，非 Cloudflare 口径）→ 0 = 无限（R2 出网官方免费）
+  envClean.db.prepare("UPDATE settings SET value = '0' WHERE key = 'traffic_limit_bytes' AND value != '0'").run();
   eq(await getVal(envClean, "r2_class_a_used"), null, "迁移清理：旧 Class A 计数行被删除");
   eq(await getVal(envClean, "r2_ops_month"), null, "迁移清理：旧统计月份行被删除");
   eq(await getVal(envClean, "traffic_used_bytes"), "7", "迁移清理：流量账不受影响");
+  eq(await getVal(envClean, "traffic_limit_bytes"), "0", "迁移清理：旧默认 10 GB 限额 → 0（无限）");
 }
 
 console.log("\n[11] addTraffic 语句顺序修复 —— 跨月清零真正生效");
@@ -600,13 +604,33 @@ console.log("\n[12] cfusage —— 官方用量对接：actionType 分类 / 账�
 {
   const cf = require("./build/cfusage.js");
 
-  // ① actionType → Class A / B 分类（对齐 Cloudflare 计费口径）
-  for (const a of ["PutObject", "CopyObject", "ListObjects", "CreateMultipartUpload", "UploadPart", "ListParts", "PutBucketCors"])
+  // ① actionType → Class A / B 分类（严格对齐 Cloudflare 官方定价页清单，2026-09 核对）
+  for (const a of ["PutObject", "CopyObject", "ListObjects", "ListBuckets", "CreateMultipartUpload", "UploadPart", "ListParts", "LifecycleStorageTierTransition", "PutBucketCors", "PutBucketEncryption"])
     eq(cf.classifyAction(a), "a", `classifyAction(${a}) = Class A`);
-  for (const a of ["GetObject", "HeadObject", "HeadBucket"])
+  for (const a of ["GetObject", "HeadObject", "HeadBucket", "UsageSummary", "GetBucketEncryption", "GetBucketLocation", "GetBucketLifecycleConfiguration"])
     eq(cf.classifyAction(a), "b", `classifyAction(${a}) = Class B`);
-  for (const a of ["DeleteObject", "DeleteObjects", "AbortMultipartUpload", "UnknownAction"])
+  for (const a of ["DeleteObject", "DeleteObjects", "DeleteBucket", "AbortMultipartUpload", "UnknownAction"])
     eq(cf.classifyAction(a), null, `classifyAction(${a}) = 不计费`);
+
+  // ①' extractOpsBreakdown：原始 GraphQL 行 → 明细 + 归类（诊断排障用）
+  const bl12 = require("./build/billing.js");
+  const bd = bl12.extractOpsBreakdown({
+    data: {
+      viewer: {
+        accounts: [{
+          r2OperationsAdaptiveGroups: [
+            { dimensions: { actionType: "GetObject" }, sum: { requests: 242 } },
+            { dimensions: { actionType: "ListBuckets" }, sum: { requests: 99 } },
+            { dimensions: { actionType: "DeleteObject" }, sum: { requests: 5 } },
+          ],
+        }],
+      },
+    },
+  });
+  eq(bd.length, 3, "extractOpsBreakdown：行数一致");
+  eq(bd[0].actionType, "GetObject", "extractOpsBreakdown：按请求数降序");
+  eq(bd.find((x) => x.actionType === "ListBuckets").klass, "a", "extractOpsBreakdown：ListBuckets 归 Class A");
+  eq(bd.find((x) => x.actionType === "DeleteObject").klass, null, "extractOpsBreakdown：DeleteObject 免费");
 
   // ② 账单周期（对齐官方面板 "September 23 - October 23" 的口径）
   const inCycle = cf.billingCycleRange(23, new Date("2026-09-29T10:00:00Z"));

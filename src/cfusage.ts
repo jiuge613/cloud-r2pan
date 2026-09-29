@@ -24,7 +24,19 @@ import type { Env } from "./types";
 import { decryptSecret } from "./crypto";
 import type { Settings } from "./settings";
 
-/** Class A（计费写操作）的 actionType 集合 */
+/**
+ * Class A/B 操作分类 —— 严格对齐 Cloudflare 官方定价页清单
+ * （https://developers.cloudflare.com/r2/pricing/，2026-09 核对）：
+ *   Class A: ListBuckets, PutBucket, ListObjects, PutObject, CopyObject,
+ *            CompleteMultipartUpload, CreateMultipartUpload, LifecycleStorageTierTransition,
+ *            ListMultipartUploads, UploadPart, UploadPartCopy, ListParts,
+ *            PutBucketEncryption, PutBucketCors, PutBucketLifecycleConfiguration
+ *   Class B: HeadBucket, HeadObject, GetObject, UsageSummary,
+ *            GetBucketEncryption, GetBucketLocation, GetBucketCors, GetBucketLifecycleConfiguration
+ *   免费:    DeleteObject, DeleteBucket, AbortMultipartUpload
+ * 注意 PutBucket* / GetBucket* 是整个前缀族（子资源配置读写均计费）。
+ * 此前漏掉 ListBuckets 等类型，导致 A 类计数比官方面板偏小。
+ */
 const CLASS_A_ACTIONS = new Set([
   "PutObject",
   "CopyObject",
@@ -33,18 +45,20 @@ const CLASS_A_ACTIONS = new Set([
   "UploadPartCopy",
   "CompleteMultipartUpload",
   "ListObjects",
+  "ListBuckets",
   "ListMultipartUploads",
   "ListParts",
+  "LifecycleStorageTierTransition",
   "RestoreObject",
 ]);
-/** Class B（计费读操作） */
-const CLASS_B_ACTIONS = new Set(["GetObject", "HeadObject", "HeadBucket"]);
+const CLASS_B_ACTIONS = new Set(["GetObject", "HeadObject", "HeadBucket", "UsageSummary"]);
 
-/** Delete / Abort 免费；PutBucket* 前缀属 Class A */
+/** Delete / Abort 免费；PutBucket* 前缀属 Class A；GetBucket* 前缀属 Class B */
 export function classifyAction(actionType: string): "a" | "b" | null {
   if (CLASS_A_ACTIONS.has(actionType)) return "a";
   if (CLASS_B_ACTIONS.has(actionType)) return "b";
   if (actionType.startsWith("PutBucket")) return "a";
+  if (actionType.startsWith("GetBucket")) return "b";
   return null; // Delete* / Abort* / 未知类型 —— 免费或不计入
 }
 

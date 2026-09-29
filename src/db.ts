@@ -212,6 +212,9 @@ const MIGRATION_STATEMENTS: string[] = [
   // 旧的本地自记账计数器（r2_class_a_used / r2_class_b_used / r2_ops_month）
   // 口径与官方账单不一致且不再写入，一次性删除避免遗留脏数据。
   "DELETE FROM settings WHERE key IN ('r2_class_a_used', 'r2_class_b_used', 'r2_ops_month')",
+  // ═══════════ 流量限额默认改为"无限"（R2 出网官方免费不限量）═══════════
+  // 旧默认 10 GB 是自设本地限额，并非 Cloudflare 计费口径；0 = 不限制。
+  "UPDATE settings SET value = '0' WHERE key = 'traffic_limit_bytes' AND value != '0'",
 ];
 
 /**

@@ -720,6 +720,7 @@ const I18N = {
     diagBillFail: '❌ 账单接口失败：{msg}',
     diagGqlOk: '✅ R2 用量接口正常（A：{a} · B：{b} · 存储：{st}）',
     diagGqlOkZero: '✅ R2 用量接口正常（本期数据为 0 或延迟 15-30 分钟）',
+    diagOpsFree: '不计费（免费操作）',
     diagGqlEmpty: '⚠️ 用量接口返回空：请核对 Account ID 是否为该 Token 所属账户的完整 32 位 ID',
     diagGql403: '❌ 用量接口 403：Token 缺少 "Account Analytics: Read" 权限',
     diagGqlFail: '❌ 用量接口失败：{msg}',
@@ -1122,6 +1123,7 @@ const I18N = {
     diagBillFail: '❌ Billing API failed: {msg}',
     diagGqlOk: '✅ R2 usage API OK (A: {a} · B: {b} · storage: {st})',
     diagGqlOkZero: '✅ R2 usage API OK (0 usage this cycle, or 15-30 min delay)',
+    diagOpsFree: 'free (not billed)',
     diagGqlEmpty: '⚠️ Usage API returned empty: verify the Account ID is the full 32-char ID of the token\'s own account',
     diagGql403: '❌ Usage API 403: token lacks "Account Analytics: Read" permission',
     diagGqlFail: '❌ Usage API failed: {msg}',
@@ -3943,6 +3945,10 @@ async function loadSettings(){
         if ((g.classA || 0) + (g.classB || 0) > 0 || (g.storageBytes || 0) > 0)
           lines.push(t('diagGqlOk', { a: fmtOps(g.classA ?? 0), b: fmtOps(g.classB ?? 0), st: fmtSize(g.storageBytes ?? 0) }));
         else lines.push(t('diagGqlOkZero'));
+        // actionType 明细（排障：与官方面板对不上时逐行核对归类）
+        for (const op of (g.opsBreakdown || [])) {
+          lines.push(`  · ${op.actionType} × ${op.requests} → ${op.klass === 'a' ? t('opsALabel') : op.klass === 'b' ? t('opsBLabel') : t('diagOpsFree')}`);
+        }
       }
       else if (g.message === 'empty_accounts_check_account_id') lines.push(t('diagGqlEmpty'));
       else if (g.status === 403) lines.push(t('diagGql403'));

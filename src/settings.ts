@@ -139,7 +139,9 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   siteTitle: "cloud-r2pan",
-  trafficLimitBytes: 10 * 1024 ** 3, // 10 GB
+  // R2 出网流量官方免费且不限量，本地不设默认限额（0 = 无限，前端显示"无限"）。
+  // 如需自设安全阀可在设置页填写，>0 时超额自动暂停下载。
+  trafficLimitBytes: 0,
   trafficUsedBytes: 0,
   trafficMonth: "",
   maxDownloadsPerIp: 2,

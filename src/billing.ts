@@ -25,7 +25,7 @@
 import type { Env } from "./types";
 import { decryptSecret } from "./crypto";
 import type { Settings } from "./settings";
-import { billingCycleRange, buildQuery, fetchOfficialUsage, parseOfficialUsage, GRAPHQL_ENDPOINT, type OfficialUsage } from "./cfusage";
+import { billingCycleRange, buildQuery, fetchOfficialUsage, parseOfficialUsage, classifyAction, GRAPHQL_ENDPOINT, type OfficialUsage } from "./cfusage";
 
 /* ═══════════ R2 计费规则（Cloudflare 官方 Standard storage 定价） ═══════════
  * 这些是服务商公开的计费参数，用于计算"离免费额度还有多远"，
@@ -480,6 +480,20 @@ export async function fetchUsageSnapshot(env: Env, settings: Settings): Promise<
  * 诊断接口绕过缓存，每次点按钮都是真实探测（不给结果写缓存）。
  */
 
+/** 诊断用：从 GraphQL 原始响应提取 actionType → 请求数明细（含归类结果，按请求数降序） */
+export function extractOpsBreakdown(json: unknown): { actionType: string; requests: number; klass: "a" | "b" | null }[] {
+  type OpGroup = { dimensions: { actionType?: string }; sum?: { requests?: number } };
+  const root = json as { data?: { viewer?: { accounts?: { r2OperationsAdaptiveGroups?: OpGroup[] }[] } } };
+  const groups: OpGroup[] = root?.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups ?? [];
+  return groups
+    .map((g: OpGroup) => ({
+      actionType: g.dimensions?.actionType ?? "",
+      requests: Math.max(0, Math.round(Number(g.sum?.requests) || 0)),
+      klass: classifyAction(g.dimensions?.actionType ?? ""),
+    }))
+    .sort((x: { requests: number }, y: { requests: number }) => y.requests - x.requests);
+}
+
 export interface DiagCheck {
   ok: boolean;
   status: number | null;
@@ -501,7 +515,13 @@ export interface DiagReport {
     r2Details: { service: string; unit: string; cumulatedQuantity: number; quantity: number; consumedQuantity: number; cumulatedCost: number }[];
   };
   /** ③ 用量接口（R2 面板同源） */
-  graphql: DiagCheck & { classA: number | null; classB: number | null; storageBytes: number | null };
+  graphql: DiagCheck & {
+    classA: number | null;
+    classB: number | null;
+    storageBytes: number | null;
+    /** actionType 明细（排障用：官方面板与本地分类的口径差可在此逐行核对） */
+    opsBreakdown: { actionType: string; requests: number; klass: "a" | "b" | null }[];
+  };
   cycle: { start: string; end: string; label: string };
   /** 从官方 BillingPeriodStart 校准出的真实周期起始日（与设置不一致说明设置填错了） */
   detected_cycle_day: number | null;
@@ -570,7 +590,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
     token_configured: !!settings.cfApiTokenCipher,
     token_verify: { ok: false, status: null, message: "", skipped: true },
     billable_usage: { ok: false, status: null, message: "", rowCount: 0, r2Services: [], allServices: [], r2Details: [] },
-    graphql: { ok: false, status: null, message: "", classA: null, classB: null, storageBytes: null },
+    graphql: { ok: false, status: null, message: "", classA: null, classB: null, storageBytes: null, opsBreakdown: [] },
     cycle: {
       start: cycle.start.toISOString().slice(0, 10),
       end: cycle.end.toISOString().slice(0, 10),
@@ -667,6 +687,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
           classA: parsed.classA,
           classB: parsed.classB,
           storageBytes: parsed.storageBytes,
+          opsBreakdown: extractOpsBreakdown(r.json),
         };
       } else {
         // HTTP 200 但拿不到 accounts[0]：通常是 Account ID 写错（token 能看到别的账户）
@@ -677,6 +698,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
           classA: null,
           classB: null,
           storageBytes: null,
+          opsBreakdown: [],
         };
       }
     } else {
@@ -687,6 +709,7 @@ export async function diagnoseUsage(env: Env, settings: Settings): Promise<DiagR
         classA: null,
         classB: null,
         storageBytes: null,
+        opsBreakdown: [],
       };
     }
   }
